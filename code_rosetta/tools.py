@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from .config import cfg
 from .graph import GraphStore, edge_to_dict, node_to_dict
 from .incremental import (
     find_project_root,
@@ -23,7 +24,9 @@ def _validate_repo_root(path: Path) -> Path:
     resolved = path.resolve()
     if not resolved.is_dir():
         raise ValueError(f"repo_root is not an existing directory: {resolved}")
-    if not (resolved / ".git").exists() and not (resolved / ".code-rosetta").exists():
+    # .git can be a file (worktree) or directory (normal repo)
+    git_path = resolved / ".git"
+    if not (git_path.exists() or (resolved / ".code-rosetta").exists()):
         raise ValueError(
             f"repo_root does not look like a project root (no .git or "
             f".code-rosetta directory found): {resolved}"
@@ -39,6 +42,15 @@ def _get_store(repo_root: str | None = None) -> tuple[GraphStore, Path]:
 
 # --- Tool 1: build_or_update_graph ---
 
+def _get_group_repos(repo_root: Path) -> list[Path] | None:
+    """If repo belongs to a config group, return all repos in that group."""
+    group_name = cfg.find_group_for_repo(repo_root)
+    if not group_name:
+        return None
+    repos = cfg.get_group_repos(group_name)
+    return [r for r in repos if r.is_dir()] if repos else None
+
+
 def build_or_update_graph(
     full_rebuild: bool = False,
     repo_root: str | None = None,
@@ -48,17 +60,48 @@ def build_or_update_graph(
     store, root = _get_store(repo_root)
     try:
         if full_rebuild:
-            result = full_build(root, store)
-            return {
-                "status": "ok",
-                "build_type": "full",
-                "summary": (
-                    f"Full build: {result['files_parsed']} files, "
-                    f"{result['total_nodes']} nodes, {result['total_edges']} edges"
-                    f" ({result.get('cross_ref_edges', 0)} cross-language)"
-                ),
-                **result,
-            }
+            group_repos = _get_group_repos(root)
+            if group_repos:
+                # Build all repos in the group into the shared DB
+                total_files = 0
+                total_nodes = 0
+                total_edges = 0
+                total_xref = 0
+                all_errors = []
+                for repo in group_repos:
+                    result = full_build(repo, store)
+                    total_files += result["files_parsed"]
+                    total_nodes += result["total_nodes"]
+                    total_edges += result["total_edges"]
+                    total_xref += result.get("cross_ref_edges", 0)
+                    all_errors.extend(result.get("errors", []))
+                return {
+                    "status": "ok",
+                    "build_type": "full_group",
+                    "summary": (
+                        f"Group build: {len(group_repos)} repos, {total_files} files, "
+                        f"{total_nodes} nodes, {total_edges} edges"
+                        f" ({total_xref} cross-language)"
+                    ),
+                    "repos_built": len(group_repos),
+                    "files_parsed": total_files,
+                    "total_nodes": total_nodes,
+                    "total_edges": total_edges,
+                    "cross_ref_edges": total_xref,
+                    "errors": all_errors,
+                }
+            else:
+                result = full_build(root, store)
+                return {
+                    "status": "ok",
+                    "build_type": "full",
+                    "summary": (
+                        f"Full build: {result['files_parsed']} files, "
+                        f"{result['total_nodes']} nodes, {result['total_edges']} edges"
+                        f" ({result.get('cross_ref_edges', 0)} cross-language)"
+                    ),
+                    **result,
+                }
         else:
             result = incremental_update(root, store, base=base)
             if result["files_updated"] == 0:

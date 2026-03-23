@@ -219,6 +219,12 @@ That's it. The graph store, incremental updates, MCP tools, and blast radius ana
 - All data is local — no cloud, no external services
 - Incremental updates use SHA-256 file hashing — only changed files are re-parsed
 
+## Known Limitations
+
+- **Go templates (Helm)**: YAML files containing Go template directives (`{{ }}`, `{{- range }}`, etc.) are not parsed. A dedicated Go template parser is planned — it will extract template structure, `.Values` references, `include`/`template` cross-file edges, and static k8s resource metadata. See `feat/go-template-parser` branch.
+- **Module output pass-through**: Terraform module-to-module output references within a single repo are not yet tracked as edges.
+- **Cross-repo object references**: Beyond `terraform_remote_state`, references like objects.git pointing at cluster resources require both repos in the same named group + parser support for the reference pattern.
+
 ## Credits
 
 Graph store and incremental update logic adapted from [code-review-graph](https://github.com/tirth8205/code-review-graph) (MIT license). Parser architecture, cross-language detection, multi-repo support, config groups, and edge weighting are original.

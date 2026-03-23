@@ -68,6 +68,15 @@ def find_project_root(start: Path | None = None) -> Path:
 
 
 def get_db_path(repo_root: Path) -> Path:
+    from .config import cfg
+
+    group_db = cfg.resolve_db_for_repo(repo_root)
+    if group_db != cfg.default_db:
+        # Repo belongs to a named group — use shared DB
+        group_db.parent.mkdir(parents=True, exist_ok=True)
+        return group_db
+
+    # Fallback: repo-local DB
     crg_dir = repo_root / ".code-rosetta"
     new_db = crg_dir / "graph.db"
     crg_dir.mkdir(exist_ok=True)

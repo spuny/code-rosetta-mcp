@@ -22,7 +22,9 @@ mcp = FastMCP(
     instructions=(
         "Cross-language codebase graph for token-efficient code understanding. "
         "Parses Python, Terraform/HCL, YAML, and Jinja2 into a unified knowledge graph "
-        "with cross-language reference detection."
+        "with cross-language reference detection. "
+        "Use the 'group' parameter to query named config groups (e.g. group='quantlane') "
+        "for cross-repo analysis. Available groups: use list_graph_stats_tool to check."
     ),
 )
 
@@ -32,6 +34,7 @@ def build_or_update_graph_tool(
     full_rebuild: bool = False,
     repo_root: Optional[str] = None,
     base: str = "HEAD~1",
+    group: Optional[str] = None,
 ) -> dict:
     """Build or incrementally update the code knowledge graph.
 
@@ -42,11 +45,14 @@ def build_or_update_graph_tool(
         full_rebuild: If True, re-parse all files. Default: False (incremental).
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for incremental diff. Default: HEAD~1.
+        group: Named config group (e.g. 'quantlane'). Builds all repos in the group.
+               Takes precedence over repo_root.
     """
     return build_or_update_graph(
         full_rebuild=full_rebuild,
         repo_root=repo_root or _default_repo_root,
         base=base,
+        group=group,
     )
 
 
@@ -56,6 +62,7 @@ def get_impact_radius_tool(
     max_depth: int = 2,
     repo_root: Optional[str] = None,
     base: str = "HEAD~1",
+    group: Optional[str] = None,
 ) -> dict:
     """Analyze the blast radius of changed files across all languages.
 
@@ -67,10 +74,12 @@ def get_impact_radius_tool(
         max_depth: Hops to traverse. Default: 2.
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for change detection. Default: HEAD~1.
+        group: Named config group. Opens the group's shared DB for cross-repo analysis.
     """
     return get_impact_radius(
         changed_files=changed_files, max_depth=max_depth,
         repo_root=repo_root or _default_repo_root, base=base,
+        group=group,
     )
 
 
@@ -79,6 +88,7 @@ def query_graph_tool(
     pattern: str,
     target: str = "",
     repo_root: Optional[str] = None,
+    group: Optional[str] = None,
 ) -> dict:
     """Run a predefined graph query to explore code relationships.
 
@@ -98,10 +108,12 @@ def query_graph_tool(
         pattern: Query pattern name.
         target: Node name, qualified name, or file path.
         repo_root: Repository root path. Auto-detected if omitted.
+        group: Named config group. Opens the group's shared DB for cross-repo queries.
     """
     return query_graph(
         pattern=pattern, target=target,
         repo_root=repo_root or _default_repo_root,
+        group=group,
     )
 
 
@@ -112,6 +124,7 @@ def search_nodes_tool(
     language: Optional[str] = None,
     limit: int = 20,
     repo_root: Optional[str] = None,
+    group: Optional[str] = None,
 ) -> dict:
     """Search for code entities by name across all languages.
 
@@ -124,16 +137,19 @@ def search_nodes_tool(
         language: Filter by language.
         limit: Max results. Default: 20.
         repo_root: Repository root path. Auto-detected if omitted.
+        group: Named config group. Searches across all repos in the group.
     """
     return search_nodes(
         query=query, kind=kind, language=language,
         limit=limit, repo_root=repo_root or _default_repo_root,
+        group=group,
     )
 
 
 @mcp.tool()
 def list_graph_stats_tool(
     repo_root: Optional[str] = None,
+    group: Optional[str] = None,
 ) -> dict:
     """Get aggregate statistics about the code knowledge graph.
 
@@ -142,8 +158,9 @@ def list_graph_stats_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        group: Named config group. Shows stats for the group's shared graph.
     """
-    return list_graph_stats(repo_root=repo_root or _default_repo_root)
+    return list_graph_stats(repo_root=repo_root or _default_repo_root, group=group)
 
 
 @mcp.tool()
@@ -154,6 +171,7 @@ def get_review_context_tool(
     max_lines_per_file: int = 200,
     repo_root: Optional[str] = None,
     base: str = "HEAD~1",
+    group: Optional[str] = None,
 ) -> dict:
     """Generate a focused, token-efficient review context for code changes.
 
@@ -166,11 +184,13 @@ def get_review_context_tool(
         max_lines_per_file: Max source lines per file. Default: 200.
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for change detection. Default: HEAD~1.
+        group: Named config group. Uses the group's shared graph for cross-repo context.
     """
     return get_review_context(
         changed_files=changed_files, max_depth=max_depth,
         include_source=include_source, max_lines_per_file=max_lines_per_file,
         repo_root=repo_root or _default_repo_root, base=base,
+        group=group,
     )
 
 

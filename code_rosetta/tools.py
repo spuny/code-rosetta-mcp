@@ -40,6 +40,31 @@ def _get_store(repo_root: str | None = None) -> tuple[GraphStore, Path]:
     return GraphStore(db_path), root
 
 
+def _get_store_for_group(group: str) -> tuple[GraphStore, list[Path]]:
+    """Open the shared DB for a named config group. Fails loudly if group doesn't exist."""
+    db_path = cfg.get_group_db(group)
+    if db_path is None:
+        available = cfg.list_groups()
+        raise ValueError(
+            f"Unknown group '{group}'. Available groups: {available}"
+        )
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    repos = [r for r in cfg.get_group_repos(group) if r.is_dir()]
+    return GraphStore(db_path), repos
+
+
+def _resolve_store(
+    group: str | None = None,
+    repo_root: str | None = None,
+) -> tuple[GraphStore, Path | None, list[Path] | None]:
+    """Resolve store from group or repo_root. Returns (store, root_or_None, group_repos_or_None)."""
+    if group:
+        store, repos = _get_store_for_group(group)
+        return store, repos[0] if repos else None, repos
+    store, root = _get_store(repo_root)
+    return store, root, None
+
+
 # --- Tool 1: build_or_update_graph ---
 
 def _get_group_repos(repo_root: Path) -> list[Path] | None:
@@ -51,45 +76,58 @@ def _get_group_repos(repo_root: Path) -> list[Path] | None:
     return [r for r in repos if r.is_dir()] if repos else None
 
 
+def _build_group(store: GraphStore, repos: list[Path]) -> dict[str, Any]:
+    """Full-build all repos in a group into the shared store."""
+    total_files = 0
+    total_nodes = 0
+    total_edges = 0
+    total_xref = 0
+    all_errors = []
+    for repo in repos:
+        result = full_build(repo, store)
+        total_files += result["files_parsed"]
+        total_nodes += result["total_nodes"]
+        total_edges += result["total_edges"]
+        total_xref += result.get("cross_ref_edges", 0)
+        all_errors.extend(result.get("errors", []))
+    return {
+        "status": "ok",
+        "build_type": "full_group",
+        "summary": (
+            f"Group build: {len(repos)} repos, {total_files} files, "
+            f"{total_nodes} nodes, {total_edges} edges"
+            f" ({total_xref} cross-language)"
+        ),
+        "repos_built": len(repos),
+        "files_parsed": total_files,
+        "total_nodes": total_nodes,
+        "total_edges": total_edges,
+        "cross_ref_edges": total_xref,
+        "errors": all_errors,
+    }
+
+
 def build_or_update_graph(
     full_rebuild: bool = False,
     repo_root: str | None = None,
     base: str = "HEAD~1",
+    group: str | None = None,
 ) -> dict[str, Any]:
     """Build or incrementally update the code knowledge graph."""
+    # Group parameter takes precedence — always does a full group build
+    if group:
+        store, repos = _get_store_for_group(group)
+        try:
+            return _build_group(store, repos)
+        finally:
+            store.close()
+
     store, root = _get_store(repo_root)
     try:
         if full_rebuild:
             group_repos = _get_group_repos(root)
             if group_repos:
-                # Build all repos in the group into the shared DB
-                total_files = 0
-                total_nodes = 0
-                total_edges = 0
-                total_xref = 0
-                all_errors = []
-                for repo in group_repos:
-                    result = full_build(repo, store)
-                    total_files += result["files_parsed"]
-                    total_nodes += result["total_nodes"]
-                    total_edges += result["total_edges"]
-                    total_xref += result.get("cross_ref_edges", 0)
-                    all_errors.extend(result.get("errors", []))
-                return {
-                    "status": "ok",
-                    "build_type": "full_group",
-                    "summary": (
-                        f"Group build: {len(group_repos)} repos, {total_files} files, "
-                        f"{total_nodes} nodes, {total_edges} edges"
-                        f" ({total_xref} cross-language)"
-                    ),
-                    "repos_built": len(group_repos),
-                    "files_parsed": total_files,
-                    "total_nodes": total_nodes,
-                    "total_edges": total_edges,
-                    "cross_ref_edges": total_xref,
-                    "errors": all_errors,
-                }
+                return _build_group(store, group_repos)
             else:
                 result = full_build(root, store)
                 return {
@@ -132,9 +170,10 @@ def get_impact_radius(
     max_results: int = 500,
     repo_root: str | None = None,
     base: str = "HEAD~1",
+    group: str | None = None,
 ) -> dict[str, Any]:
     """Analyze the blast radius of changed files."""
-    store, root = _get_store(repo_root)
+    store, root, _ = _resolve_store(group=group, repo_root=repo_root)
     try:
         if changed_files is None:
             changed_files = get_changed_files(root, base)
@@ -192,9 +231,10 @@ def query_graph(
     pattern: str,
     target: str = "",
     repo_root: str | None = None,
+    group: str | None = None,
 ) -> dict[str, Any]:
     """Run a predefined graph query."""
-    store, root = _get_store(repo_root)
+    store, root, _ = _resolve_store(group=group, repo_root=repo_root)
     try:
         if pattern not in _QUERY_PATTERNS:
             return {
@@ -322,9 +362,10 @@ def search_nodes(
     language: str | None = None,
     limit: int = 20,
     repo_root: str | None = None,
+    group: str | None = None,
 ) -> dict[str, Any]:
     """Search for nodes by name, optionally filtered by kind and language."""
-    store, root = _get_store(repo_root)
+    store, root, _ = _resolve_store(group=group, repo_root=repo_root)
     try:
         results = store.search_nodes(query, limit=limit * 2)
         if kind:
@@ -347,14 +388,18 @@ def search_nodes(
 
 # --- Tool 5: list_graph_stats ---
 
-def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
+def list_graph_stats(
+    repo_root: str | None = None,
+    group: str | None = None,
+) -> dict[str, Any]:
     """Get aggregate statistics about the knowledge graph."""
-    store, root = _get_store(repo_root)
+    store, root, _ = _resolve_store(group=group, repo_root=repo_root)
     try:
         stats = store.get_stats()
+        label = f"group '{group}'" if group else (root.name if root else "unknown")
 
         summary_parts = [
-            f"Graph statistics for {root.name}:",
+            f"Graph statistics for {label}:",
             f"  Files: {stats.files_count}",
             f"  Total nodes: {stats.total_nodes}",
             f"  Total edges: {stats.total_edges}",
@@ -394,9 +439,10 @@ def get_review_context(
     max_lines_per_file: int = 200,
     repo_root: str | None = None,
     base: str = "HEAD~1",
+    group: str | None = None,
 ) -> dict[str, Any]:
     """Generate a focused review context from changed files."""
-    store, root = _get_store(repo_root)
+    store, root, _ = _resolve_store(group=group, repo_root=repo_root)
     try:
         if changed_files is None:
             changed_files = get_changed_files(root, base)

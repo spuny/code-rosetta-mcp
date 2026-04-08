@@ -121,5 +121,26 @@ def init_config(groups: dict[str, dict] | None = None) -> Path:
     return _CONFIG_FILE
 
 
-# Module-level singleton
-cfg = Config()
+# Module-level accessor — reloads config when the file changes on disk.
+class _ConfigProxy:
+    """Lazy proxy that reloads config.yaml when its mtime changes."""
+
+    def __init__(self):
+        self._config: Config | None = None
+        self._mtime: float = 0.0
+
+    def _refresh(self) -> Config:
+        try:
+            current_mtime = _CONFIG_FILE.stat().st_mtime
+        except OSError:
+            current_mtime = 0.0
+        if self._config is None or current_mtime != self._mtime:
+            self._config = Config()
+            self._mtime = current_mtime
+        return self._config
+
+    def __getattr__(self, name: str):
+        return getattr(self._refresh(), name)
+
+
+cfg = _ConfigProxy()

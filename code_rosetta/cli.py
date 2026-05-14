@@ -311,6 +311,96 @@ def groups():
 
 
 @main.command()
+@click.argument("query")
+@click.option("--kind", default=None, help="Filter by node kind (function, class, resource, ...)")
+@click.option("--language", default=None, help="Filter by language (python, hcl, yaml, jinja2)")
+@click.option("--limit", default=20, help="Max results (default: 20)")
+@click.option("--group", default=None, help="Config group name")
+@click.option("--repo", default=None, help="Repository root (auto-detected)")
+@click.option("--json-output", "as_json", is_flag=True, help="Output as JSON")
+def search(query, kind, language, limit, group, repo, as_json):
+    """Search for nodes by name."""
+    _ensure_parsers()
+
+    from .tools import search_nodes
+
+    result = search_nodes(query, kind=kind, language=language, limit=limit,
+                          repo_root=repo, group=group)
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+    else:
+        click.echo(result["summary"])
+        for r in result.get("results", []):
+            click.echo(f"  {r['kind']:12s} {r['qualified_name']}  ({r.get('file_path', '?')}:{r.get('line', '?')})")
+
+
+@main.command()
+@click.argument("pattern", type=click.Choice([
+    "callers_of", "callees_of", "imports_of", "importers_of",
+    "children_of", "tests_for", "inheritors_of", "file_summary",
+    "references_to", "cross_language",
+]))
+@click.argument("target", default="")
+@click.option("--group", default=None, help="Config group name")
+@click.option("--repo", default=None, help="Repository root (auto-detected)")
+@click.option("--json-output", "as_json", is_flag=True, help="Output as JSON")
+def query(pattern, target, group, repo, as_json):
+    """Run a predefined graph query.
+
+    Patterns: callers_of, callees_of, imports_of, importers_of,
+    children_of, tests_for, inheritors_of, file_summary,
+    references_to, cross_language
+    """
+    _ensure_parsers()
+
+    from .tools import query_graph
+
+    result = query_graph(pattern, target=target, repo_root=repo, group=group)
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+    else:
+        click.echo(result["summary"])
+        if result.get("status") == "ambiguous":
+            for c in result.get("candidates", []):
+                click.echo(f"  {c['qualified_name']}  ({c.get('file_path', '?')})")
+        else:
+            for r in result.get("results", []):
+                if isinstance(r, dict) and "qualified_name" in r:
+                    click.echo(f"  {r['kind']:12s} {r['qualified_name']}  ({r.get('file_path', '?')}:{r.get('line', '?')})")
+                else:
+                    click.echo(f"  {r}")
+
+
+@main.command("review-context")
+@click.option("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
+@click.option("--files", default=None, help="Comma-separated changed files (auto-detected from git)")
+@click.option("--depth", default=2, help="Max traversal depth (default: 2)")
+@click.option("--no-source", is_flag=True, help="Omit source snippets")
+@click.option("--group", default=None, help="Config group name")
+@click.option("--repo", default=None, help="Repository root (auto-detected)")
+@click.option("--json-output", "as_json", is_flag=True, help="Output as JSON")
+def review_context(base, files, depth, no_source, group, repo, as_json):
+    """Generate review context for changed files."""
+    _ensure_parsers()
+
+    from .tools import get_review_context
+
+    changed = files.split(",") if files else None
+    result = get_review_context(changed_files=changed, max_depth=depth,
+                                include_source=not no_source, repo_root=repo,
+                                base=base, group=group)
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+    else:
+        click.echo(result["summary"])
+        ctx = result.get("context", {})
+        if ctx.get("impacted_files"):
+            click.echo("\nImpacted files:")
+            for f in ctx["impacted_files"]:
+                click.echo(f"  {f}")
+
+
+@main.command()
 @click.option("--repo", default=None, help="Repository root (auto-detected)")
 @click.option("--db", default=None, help="Path to graph database (overrides config)")
 def serve(repo, db):

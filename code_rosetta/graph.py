@@ -135,6 +135,16 @@ class GraphStore:
     def _init_schema(self) -> None:
         self._conn.executescript(_SCHEMA_SQL)
         try:
+            # Check if existing FTS table matches expected schema
+            row = self._conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='nodes_fts'"
+            ).fetchone()
+            if row and "keywords" not in (row[0] or ""):
+                # Old schema without keywords column -- drop and recreate
+                for t in ("nodes_fts", "nodes_fts_data", "nodes_fts_idx",
+                          "nodes_fts_content", "nodes_fts_docsize", "nodes_fts_config"):
+                    self._conn.execute(f"DROP TABLE IF EXISTS {t}")
+                self._conn.commit()
             self._conn.executescript(_FTS_SCHEMA_SQL)
         except Exception:
             pass  # FTS5 not available -- degrade gracefully

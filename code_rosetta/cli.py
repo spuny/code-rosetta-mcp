@@ -21,6 +21,8 @@ def _ensure_parsers():
     from .parsers.jinja_parser import jinja2_parser
     from .parsers.dockerfile_parser import dockerfile_parser
     from .parsers.bash_parser import bash_parser
+    from .parsers.gotemplate_parser import gotemplate_parser, _is_helm_template
+    from .parsers import register_detector
 
     register_parser(python_parser)
     register_parser(hcl_parser)
@@ -28,6 +30,9 @@ def _ensure_parsers():
     register_parser(jinja2_parser)
     register_parser(dockerfile_parser)
     register_parser(bash_parser)
+    register_parser(gotemplate_parser)
+    # Route .yaml/.yml files in templates/ dirs to Go template parser
+    register_detector(_is_helm_template, gotemplate_parser)
 
 
 def _resolve_db(repo: str | None = None, db: str | None = None) -> tuple[Path, Path | None]:

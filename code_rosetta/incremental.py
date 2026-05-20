@@ -185,7 +185,7 @@ def collect_all_files(repo_root: Path) -> list[str]:
         full_path = repo_root / rel_path
         if not full_path.is_file() or full_path.is_symlink():
             continue
-        if full_path.suffix.lower() not in exts:
+        if full_path.suffix.lower() not in exts and get_parser(full_path) is None:
             continue
         if _is_binary(full_path):
             continue

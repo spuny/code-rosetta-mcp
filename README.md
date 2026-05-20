@@ -223,6 +223,15 @@ This prevents a change in `main.tf` from falsely impacting every resource in the
 
 ## Changelog
 
+### 1.2.0 (2026-05-20)
+
+**Import-aware call resolution + INHERITS + cross-language edges**
+
+- **Python call resolution** -- `_FileScope` tracks imports and local definitions during parsing. `self.method()`, imported names, module-aliased calls all resolve to graph-qualified targets. Post-build pass maps module paths to file paths for cross-file resolution. CALLS: 0.03% -> 13.4% resolved.
+- **INHERITS resolution** -- same scope-based resolution. 0% -> 55.7% resolved.
+- **Cross-language edges** -- Go template `.Values` references resolve to `values.yaml` Section nodes (87.2%). Template include/template calls resolve to Template nodes (45 edges). 34 cross-language edges now connect gotemplate -> yaml.
+- **Post-build `resolve_cross_file_calls()`** runs automatically after `build-group`.
+
 ### 1.1.0 (2026-05-20)
 
 **3 new language parsers + FTS5 search + visualization**

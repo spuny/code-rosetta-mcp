@@ -41,12 +41,25 @@ def register_parser(parser: LanguageParser) -> None:
         _FILENAME_PARSERS[pattern] = parser
 
 
+# Registry: detector function -> parser instance (checked before extension lookup)
+_DETECTORS: list[tuple[callable, LanguageParser]] = []
+
+
+def register_detector(detector: callable, parser: LanguageParser) -> None:
+    """Register a file-content detector that overrides extension-based lookup."""
+    _DETECTORS.append((detector, parser))
+
+
 def get_parser(file_path: Path) -> LanguageParser | None:
     """Get the parser for a file, or None if unsupported."""
-    # Try extension first
-    parser = _PARSERS.get(file_path.suffix.lower())
-    if parser:
-        return parser
+    # Try detectors first (e.g. Go templates in .yaml files)
+    for detector, parser in _DETECTORS:
+        if detector(file_path):
+            return parser
+    # Try extension
+    ext_parser = _PARSERS.get(file_path.suffix.lower())
+    if ext_parser:
+        return ext_parser
     # Try filename match
     name = file_path.name
     for pattern, p in _FILENAME_PARSERS.items():

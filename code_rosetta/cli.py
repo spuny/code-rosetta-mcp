@@ -316,30 +316,6 @@ def groups():
 
 
 @main.command()
-@click.argument("query")
-@click.option("--kind", default=None, help="Filter by node kind (function, class, resource, ...)")
-@click.option("--language", default=None, help="Filter by language (python, hcl, yaml, jinja2)")
-@click.option("--limit", default=20, help="Max results (default: 20)")
-@click.option("--group", default=None, help="Config group name")
-@click.option("--repo", default=None, help="Repository root (auto-detected)")
-@click.option("--json-output", "as_json", is_flag=True, help="Output as JSON")
-def search(query, kind, language, limit, group, repo, as_json):
-    """Search for nodes by name."""
-    _ensure_parsers()
-
-    from .tools import search_nodes
-
-    result = search_nodes(query, kind=kind, language=language, limit=limit,
-                          repo_root=repo, group=group)
-    if as_json:
-        click.echo(json.dumps(result, indent=2))
-    else:
-        click.echo(result["summary"])
-        for r in result.get("results", []):
-            click.echo(f"  {r['kind']:12s} {r['qualified_name']}  ({r.get('file_path', '?')}:{r.get('line', '?')})")
-
-
-@main.command()
 @click.argument("pattern", type=click.Choice([
     "callers_of", "callees_of", "imports_of", "importers_of",
     "children_of", "tests_for", "inheritors_of", "file_summary",

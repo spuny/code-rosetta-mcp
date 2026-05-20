@@ -64,6 +64,11 @@ CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind);
 CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file_path);
 """
 
+_FTS_SCHEMA_SQL = (
+    "CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5"
+    '(name, qualified_name, tokenize="unicode61", content=nodes, content_rowid=id)'
+)
+
 
 @dataclass
 class GraphNode:
@@ -129,6 +134,28 @@ class GraphStore:
 
     def _init_schema(self) -> None:
         self._conn.executescript(_SCHEMA_SQL)
+        try:
+            self._conn.executescript(_FTS_SCHEMA_SQL)
+        except Exception:
+            pass  # FTS5 not available -- degrade gracefully
+        self._conn.commit()
+
+    def _has_fts(self) -> bool:
+        """Check if FTS5 table exists."""
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='nodes_fts'"
+        ).fetchone()
+        return row is not None
+
+    def rebuild_fts(self) -> None:
+        """Rebuild the FTS index from the nodes table."""
+        if not self._has_fts():
+            return
+        self._conn.execute("DELETE FROM nodes_fts")
+        self._conn.execute(
+            "INSERT INTO nodes_fts(rowid, name, qualified_name) "
+            "SELECT id, name, qualified_name FROM nodes"
+        )
         self._conn.commit()
 
     def _invalidate_cache(self) -> None:
@@ -262,6 +289,43 @@ class GraphStore:
         return [r["file_path"] for r in rows]
 
     def search_nodes(self, query: str, limit: int = 20) -> list[GraphNode]:
+        """Search nodes. Uses FTS5 with BM25 ranking if available, falls back to LIKE."""
+        if not query.strip():
+            return []
+
+        # Try FTS5 first
+        if self._has_fts():
+            return self._search_fts(query, limit)
+        return self._search_like(query, limit)
+
+    def _search_fts(self, query: str, limit: int) -> list[GraphNode]:
+        """FTS5 search with BM25 ranking and prefix matching."""
+        # Tokenize camelCase and snake_case into words for better matching
+        tokens = _tokenize_query(query)
+        if not tokens:
+            return []
+
+        # Build FTS5 query: each token as prefix match, all must match
+        fts_terms = " AND ".join(f'"{t}"*' for t in tokens)
+
+        try:
+            rows = self._conn.execute(
+                "SELECT n.* FROM nodes_fts fts "
+                "JOIN nodes n ON n.id = fts.rowid "
+                "WHERE nodes_fts MATCH ? "
+                "ORDER BY bm25(nodes_fts) "
+                "LIMIT ?",
+                (fts_terms, limit),
+            ).fetchall()
+            if rows:
+                return [self._row_to_node(r) for r in rows]
+        except Exception:
+            pass  # FTS query failed -- fall back to LIKE
+
+        return self._search_like(query, limit)
+
+    def _search_like(self, query: str, limit: int) -> list[GraphNode]:
+        """Fallback LIKE-based search."""
         words = query.lower().split()
         if not words:
             return []
@@ -488,6 +552,34 @@ class GraphStore:
             line=row["line"],
             extra=json.loads(row["extra"]) if row["extra"] else {},
         )
+
+
+import re as _re
+
+
+def _tokenize_query(query: str) -> list[str]:
+    """Split a query into tokens, handling camelCase and snake_case.
+
+    Examples:
+        'getUser' -> ['get', 'user']
+        'get_user_name' -> ['get', 'user', 'name']
+        'HTTPClient' -> ['http', 'client']
+        'deploy service' -> ['deploy', 'service']
+    """
+    # First split on whitespace and underscores
+    parts = _re.split(r'[\s_/:.]+', query)
+    tokens = []
+    for part in parts:
+        if not part:
+            continue
+        # Split camelCase: 'getUser' -> ['get', 'User'], 'HTTPClient' -> ['HTTP', 'Client']
+        camel_parts = _re.sub(r'([A-Z]+)([A-Z][a-z])', r'\1 \2', part)
+        camel_parts = _re.sub(r'([a-z0-9])([A-Z])', r'\1 \2', camel_parts)
+        for t in camel_parts.split():
+            t = t.lower().strip()
+            if t and len(t) >= 2:
+                tokens.append(t)
+    return tokens
 
 
 def _sanitize_name(s: str, max_len: int = 256) -> str:

@@ -224,6 +224,11 @@ def build_group(group_name):
             f"{stats.files_count} files, languages: {', '.join(stats.languages)}"
         )
 
+        # Rebuild FTS index after build
+        if store._has_fts():
+            store.rebuild_fts()
+            click.echo("FTS search index rebuilt.")
+
 
 @main.command()
 @click.option("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
@@ -318,3 +323,241 @@ def serve(repo, db):
     _ensure_parsers()
     from .main import main as serve_main
     serve_main(repo_root=repo)
+
+
+@main.command()
+@click.argument("query")
+@click.option("--group", "-g", default=None, help="Config group to search")
+@click.option("--kind", "-k", default=None, help="Filter by node kind (Function, Class, Method, ...)")
+@click.option("--language", "-l", default=None, help="Filter by language (python, hcl, yaml, ...)")
+@click.option("--limit", "-n", default=20, help="Max results (default 20)")
+@click.option("--json-output", is_flag=True, help="Output as JSON")
+@click.option("--repo", default=None, help="Repository root (auto-detected)")
+@click.option("--db", default=None, help="Path to graph database")
+def search(query, group, kind, language, limit, json_output, repo, db):
+    """Search nodes by name with ranked results.
+
+    Supports camelCase, snake_case, and prefix matching.
+    Uses FTS5 with BM25 ranking when available.
+
+    Examples:
+        code-rosetta search getUserName -g quantlane
+        code-rosetta search "deploy service" -g quantlane --kind Function
+        code-rosetta search collector -g quantlane --language python -n 50
+    """
+    from .graph import GraphStore
+
+    if group:
+        from .config import cfg
+        db_path = cfg.get_group_db(group)
+        if db_path is None:
+            click.echo(f"Unknown group '{group}'.", err=True)
+            sys.exit(1)
+    else:
+        db_path, _ = _resolve_db(repo, db)
+
+    if not db_path.exists():
+        click.echo("No graph found. Run 'code-rosetta build' first.", err=True)
+        sys.exit(1)
+
+    with GraphStore(db_path) as store:
+        results = store.search_nodes(query, limit=limit * 2)
+        if kind:
+            results = [r for r in results if r.kind == kind]
+        if language:
+            results = [r for r in results if r.language == language]
+        results = results[:limit]
+
+        if json_output:
+            from .graph import node_to_dict
+            click.echo(json.dumps([node_to_dict(r) for r in results], indent=2))
+        else:
+            if not results:
+                click.echo(f"No results for '{query}'.")
+                return
+            click.echo(f"Found {len(results)} result(s) for '{query}':\n")
+            for r in results:
+                loc = f"{r.file_path}:{r.line_start}" if r.line_start else r.file_path
+                click.echo(f"  {r.kind:<10} {r.name}")
+                click.echo(f"             {loc}")
+                if r.language:
+                    click.echo(f"             [{r.language}]")
+                click.echo()
+
+
+@main.command("rebuild-fts")
+@click.option("--group", "-g", default=None, help="Config group")
+@click.option("--repo", default=None, help="Repository root")
+@click.option("--db", default=None, help="Path to graph database")
+def rebuild_fts(group, repo, db):
+    """Rebuild the FTS5 full-text search index.
+
+    Run this after upgrading to enable ranked search,
+    or if search results seem stale.
+    """
+    from .graph import GraphStore
+
+    if group:
+        from .config import cfg
+        db_path = cfg.get_group_db(group)
+        if db_path is None:
+            click.echo(f"Unknown group '{group}'.", err=True)
+            sys.exit(1)
+    else:
+        db_path, _ = _resolve_db(repo, db)
+
+    if not db_path.exists():
+        click.echo("No graph found. Run 'code-rosetta build' first.", err=True)
+        sys.exit(1)
+
+    with GraphStore(db_path) as store:
+        if not store._has_fts():
+            click.echo("FTS5 not available in this SQLite build.", err=True)
+            sys.exit(1)
+        store.rebuild_fts()
+        stats = store.get_stats()
+        click.echo(f"FTS index rebuilt: {stats.total_nodes} nodes indexed.")
+
+
+@main.command()
+@click.option("--group", "-g", default=None, help="Config group")
+@click.option("--target", "-t", default=None, help="Node qualified name to visualize neighborhood")
+@click.option("--files", "-f", default=None, help="Comma-separated changed files for impact view")
+@click.option("--depth", "-d", default=2, help="Max traversal depth (default 2)")
+@click.option("--output", "-o", default=None, help="Output HTML file (default: /tmp/rosetta-viz.html)")
+@click.option("--no-open", is_flag=True, help="Don't open in browser")
+@click.option("--repo", default=None, help="Repository root")
+@click.option("--db", default=None, help="Path to graph database")
+def viz(group, target, files, depth, output, no_open, repo, db):
+    """Generate an interactive graph visualization.
+
+    Without --target or --files, visualizes the full graph structure
+    (top-level files and their connections).
+
+    Examples:
+        code-rosetta viz -g quantlane -t "path::FunctionName"
+        code-rosetta viz -g quantlane -f "path/a.py,path/b.tf" -d 3
+        code-rosetta viz -g quantlane -o graph.html
+    """
+    from .graph import GraphStore, node_to_dict, edge_to_dict
+    from .visualize import render_graph_html
+
+    if group:
+        from .config import cfg
+        db_path = cfg.get_group_db(group)
+        if db_path is None:
+            click.echo(f"Unknown group '{group}'.", err=True)
+            sys.exit(1)
+        _, repo_root = _resolve_db(repo, db)
+    else:
+        db_path, repo_root = _resolve_db(repo, db)
+
+    if not db_path.exists():
+        click.echo("No graph found. Run 'code-rosetta build' first.", err=True)
+        sys.exit(1)
+
+    with GraphStore(db_path) as store:
+        nodes = []
+        edges = []
+        title = "Code Rosetta Graph"
+
+        if target:
+            # Visualize neighborhood of a specific node
+            node = store.get_node(target)
+            if not node:
+                candidates = store.search_nodes(target, limit=5)
+                if len(candidates) == 1:
+                    node = candidates[0]
+                elif len(candidates) > 1:
+                    click.echo(f"Ambiguous target '{target}'. Candidates:")
+                    for c in candidates:
+                        click.echo(f"  {c.qualified_name}")
+                    sys.exit(1)
+                else:
+                    click.echo(f"No node found for '{target}'.", err=True)
+                    sys.exit(1)
+
+            title = f"Neighborhood: {node.name}"
+            # Collect neighbors up to depth
+            visited_qns = {node.qualified_name}
+            frontier = {node.qualified_name}
+            all_edges = []
+
+            for _ in range(depth):
+                next_frontier = set()
+                for qn in frontier:
+                    for e in store.get_edges_by_source(qn):
+                        if e.kind != "CONTAINS":
+                            all_edges.append(e)
+                            if e.target_qualified not in visited_qns:
+                                visited_qns.add(e.target_qualified)
+                                next_frontier.add(e.target_qualified)
+                    for e in store.get_edges_by_target(qn):
+                        if e.kind != "CONTAINS":
+                            all_edges.append(e)
+                            if e.source_qualified not in visited_qns:
+                                visited_qns.add(e.source_qualified)
+                                next_frontier.add(e.source_qualified)
+                frontier = next_frontier
+
+            for qn in visited_qns:
+                n = store.get_node(qn)
+                if n:
+                    nodes.append(node_to_dict(n))
+            edges = [edge_to_dict(e) for e in all_edges]
+
+        elif files:
+            # Impact radius visualization
+            file_list = [f.strip() for f in files.split(",")]
+            if repo_root:
+                abs_files = [str(Path(repo_root) / f) for f in file_list]
+            else:
+                abs_files = file_list
+            result = store.get_impact_radius(abs_files, max_depth=depth)
+            title = f"Impact: {', '.join(file_list)}"
+            for n in result["changed_nodes"] + result["impacted_nodes"]:
+                nodes.append(node_to_dict(n))
+            edges = [edge_to_dict(e) for e in result["edges"]]
+
+        else:
+            # Overview: top connected nodes
+            click.echo("No --target or --files specified. Generating overview...")
+            stats = store.get_stats()
+            title = f"Code Rosetta Overview ({stats.total_nodes} nodes, {stats.total_edges} edges)"
+            # Get nodes with most connections (only those that exist as nodes)
+            rows = store._conn.execute(
+                "SELECT e.target_qualified, COUNT(*) as cnt FROM edges e "
+                "JOIN nodes n ON n.qualified_name = e.target_qualified "
+                "WHERE e.kind != 'CONTAINS' "
+                "GROUP BY e.target_qualified ORDER BY cnt DESC LIMIT 50"
+            ).fetchall()
+            hub_qns = set()
+            for r in rows:
+                qn = r["target_qualified"]
+                hub_qns.add(qn)
+                n = store.get_node(qn)
+                if n:
+                    nodes.append(node_to_dict(n))
+                # Also add their direct callers/importers for context
+                for e in store.get_edges_by_target(qn):
+                    if e.kind != "CONTAINS":
+                        hub_qns.add(e.source_qualified)
+                        src = store.get_node(e.source_qualified)
+                        if src and src.qualified_name not in {nd["qualified_name"] for nd in nodes}:
+                            nodes.append(node_to_dict(src))
+            all_qns = {nd["qualified_name"] for nd in nodes}
+            hub_edges = store.get_edges_among(all_qns)
+            edges = [edge_to_dict(e) for e in hub_edges if e.kind != "CONTAINS"]
+
+    if not nodes:
+        click.echo("No nodes to visualize.")
+        return
+
+    out_path = Path(output) if output else Path("/tmp/rosetta-viz.html")
+    html = render_graph_html(nodes, edges, title=title)
+    out_path.write_text(html)
+    click.echo(f"Visualization: {out_path} ({len(nodes)} nodes, {len(edges)} edges)")
+
+    if not no_open:
+        import subprocess
+        subprocess.run(["open", str(out_path)], check=False)

@@ -1,6 +1,6 @@
 [project]
 name = "code-rosetta-mcp"
-version = "0.1.0"
+version = "1.1.0"
 description = "Cross-language codebase graph for LLM agents. Python, Terraform, YAML, Jinja2 — one unified map."
 readme = "README.md"
 license = "MIT"

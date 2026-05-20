@@ -28,17 +28,31 @@ class CrossReferencePass(Protocol):
 
 # Registry: extension -> parser instance
 _PARSERS: dict[str, LanguageParser] = {}
+# Registry: filename pattern -> parser instance
+_FILENAME_PARSERS: dict[str, LanguageParser] = {}
 
 
 def register_parser(parser: LanguageParser) -> None:
     """Register a parser for its declared file extensions."""
     for ext in parser.extensions:
         _PARSERS[ext] = parser
+    # Also register filename patterns if declared
+    for pattern in getattr(parser, "filenames", []):
+        _FILENAME_PARSERS[pattern] = parser
 
 
 def get_parser(file_path: Path) -> LanguageParser | None:
     """Get the parser for a file, or None if unsupported."""
-    return _PARSERS.get(file_path.suffix.lower())
+    # Try extension first
+    parser = _PARSERS.get(file_path.suffix.lower())
+    if parser:
+        return parser
+    # Try filename match
+    name = file_path.name
+    for pattern, p in _FILENAME_PARSERS.items():
+        if name == pattern or name.startswith(pattern + "."):
+            return p
+    return None
 
 
 def detect_language(file_path: Path) -> str | None:

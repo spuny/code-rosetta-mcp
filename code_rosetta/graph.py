@@ -148,14 +148,20 @@ class GraphStore:
         return row is not None
 
     def rebuild_fts(self) -> None:
-        """Rebuild the FTS index from the nodes table."""
+        """Rebuild the FTS index from the nodes table, including keywords from extra."""
         if not self._has_fts():
             return
         self._conn.execute("DELETE FROM nodes_fts")
-        self._conn.execute(
-            "INSERT INTO nodes_fts(rowid, name, qualified_name) "
-            "SELECT id, name, qualified_name FROM nodes"
-        )
+        rows = self._conn.execute(
+            "SELECT id, name, qualified_name, extra FROM nodes"
+        ).fetchall()
+        for r in rows:
+            keywords = _extract_keywords(r["extra"])
+            self._conn.execute(
+                "INSERT INTO nodes_fts(rowid, name, qualified_name, keywords) "
+                "VALUES (?, ?, ?, ?)",
+                (r["id"], r["name"], r["qualified_name"], keywords),
+            )
         self._conn.commit()
 
     def _invalidate_cache(self) -> None:
@@ -557,6 +563,36 @@ class GraphStore:
 import re as _re
 
 
+def _extract_keywords(extra_json: str | None) -> str:
+    """Flatten all keys and string values from extra JSON into a searchable string.
+
+    This lets FTS find YAML field names like 'priorityClassName',
+    k8s kinds, label values, etc.
+    """
+    if not extra_json or extra_json == "{}":
+        return ""
+    try:
+        data = json.loads(extra_json)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+
+    parts: list[str] = []
+
+    def _walk(obj: Any, prefix: str = "") -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                parts.append(str(k))
+                _walk(v, f"{prefix}{k}.")
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item, prefix)
+        elif isinstance(obj, str) and len(obj) <= 200:
+            parts.append(obj)
+
+    _walk(data)
+    return " ".join(parts)
+
+
 def _tokenize_query(query: str) -> list[str]:
     """Split a query into tokens, handling camelCase and snake_case.
 
@@ -566,8 +602,8 @@ def _tokenize_query(query: str) -> list[str]:
         'HTTPClient' -> ['http', 'client']
         'deploy service' -> ['deploy', 'service']
     """
-    # First split on whitespace and underscores
-    parts = _re.split(r'[\s_/:.]+', query)
+    # First split on whitespace, underscores, slashes, colons, dots
+    parts = _re.split(r'[\s_/:.,]+', query)
     tokens = []
     for part in parts:
         if not part:

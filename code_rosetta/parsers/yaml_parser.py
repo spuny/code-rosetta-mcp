@@ -175,6 +175,28 @@ def _k8s_namespace(doc: CommentedMap) -> str:
     return ""
 
 
+def _collect_all_keys(obj: Any, prefix: str = "", max_depth: int = 10) -> list[str]:
+    """Recursively collect all mapping keys from a YAML doc.
+
+    Returns a flat list of dotted key paths, e.g.:
+    ['spec', 'spec.template', 'spec.template.spec', 'spec.template.spec.priorityClassName',
+     'spec.template.spec.containers', 'spec.template.spec.containers.image', ...]
+    """
+    if max_depth <= 0:
+        return []
+    keys: list[str] = []
+    if isinstance(obj, CommentedMap):
+        for k in obj.keys():
+            k_str = str(k)
+            full = f"{prefix}{k_str}" if prefix else k_str
+            keys.append(full)
+            keys.extend(_collect_all_keys(obj[k], f"{full}.", max_depth - 1))
+    elif isinstance(obj, (list, tuple)):
+        for item in obj:
+            keys.extend(_collect_all_keys(item, prefix, max_depth - 1))
+    return keys
+
+
 def _k8s_referenced_names(doc: CommentedMap) -> list[tuple[str, str]]:
     """Return a list of (kind_hint, name) pairs that this k8s doc references by name.
 
@@ -515,6 +537,11 @@ class YAMLParser:
                 trimmed = {k: v for k, v in annotations.items() if len(str(v)) <= 200}
                 if trimmed:
                     extra["annotations"] = trimmed
+
+        # Collect all nested keys for FTS keyword search
+        spec_keys = _collect_all_keys(doc)
+        if spec_keys:
+            extra["spec_keys"] = spec_keys
 
         nodes.append(NodeInfo(
             kind="K8sResource",

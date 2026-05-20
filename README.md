@@ -223,19 +223,21 @@ This prevents a change in `main.tf` from falsely impacting every resource in the
 
 ## Changelog
 
-### 0.2.0 (2026-05-20)
+### 1.1.0 (2026-05-20)
 
-**New CLI commands:** `search`, `query`, `review-context`, `viz`, `rebuild-fts`
+**3 new language parsers + FTS5 search + visualization**
 
-- **FTS5 ranked search** -- BM25 scoring, camelCase/snake_case tokenization, prefix matching. Falls back to LIKE if FTS5 is unavailable.
-- **YAML keyword indexing** -- all nested keys from K8s docs (e.g. `priorityClassName`, `containerPort`) are extracted and searchable via FTS.
+- **Dockerfile parser** -- extracts FROM stages, COPY sources, EXPOSE ports, ENTRYPOINT. Multi-stage DEPENDS_ON edges. Handles files named `Dockerfile` (no extension).
+- **Bash/Shell parser** -- extracts functions, exported variables, source/. imports, function calls. Supports `.sh` and `.bash`.
+- **Go template parser (Helm)** -- extracts template definitions, include/template calls, `.Values.*` references. Routes `.yaml` files in `templates/` dirs automatically.
+- **FTS5 ranked search** -- BM25 scoring, camelCase/snake_case tokenization, prefix matching. Searches nested YAML spec keys (e.g. `priorityClassName`). Falls back to LIKE if FTS5 is unavailable.
 - **Graph queries via CLI** -- `callers_of`, `callees_of`, `imports_of`, `importers_of`, `children_of`, `tests_for`, `inheritors_of`, `file_summary`, `references_to`, `cross_language`.
 - **Review context** -- generates impact-aware review context for changed files.
 - **Interactive visualization** -- self-contained HTML with D3.js force-directed graph. Dark theme, color-coded nodes/edges, click-to-highlight, search filter, zoom/drag.
-- **Auto FTS migration** -- detects old FTS schema and rebuilds automatically.
-- **FTS auto-rebuild** -- `build-group` rebuilds the FTS index after every build.
+- **Filename-based parser registry** -- parsers can register filename patterns (e.g. `Dockerfile`) in addition to extensions.
+- **File-content detectors** -- parsers can register detector functions that override extension-based routing.
 
-### 0.1.0
+### 1.0.0
 
 Initial release. Parsers for Python, Terraform/HCL, YAML, Jinja2. SQLite + NetworkX graph. MCP server. Incremental builds. Cross-language edge detection.
 

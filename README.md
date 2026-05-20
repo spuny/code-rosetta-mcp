@@ -98,14 +98,66 @@ code-rosetta build     # build the graph
 |---|---|
 | `code-rosetta init` | Create config file at `~/.code-rosetta/config.yaml` |
 | `code-rosetta install` | Set up `.mcp.json` for Claude Code MCP integration |
-| `code-rosetta build` | Full graph build — parse all files |
+| `code-rosetta build` | Full graph build -- parse all files |
 | `code-rosetta build-group <name>` | Build all repos in a config group |
-| `code-rosetta update` | Incremental update — only changed files |
+| `code-rosetta update` | Incremental update -- only changed files |
 | `code-rosetta status` | Show graph statistics |
 | `code-rosetta groups` | List configured graph groups |
+| `code-rosetta search <query>` | FTS5 ranked search with camelCase/snake_case support |
+| `code-rosetta query <pattern> <target>` | Graph queries (callers_of, callees_of, imports_of, ...) |
+| `code-rosetta review-context` | Generate review context for changed files |
+| `code-rosetta viz` | Interactive D3.js graph visualization |
+| `code-rosetta rebuild-fts` | Rebuild the full-text search index |
 | `code-rosetta serve` | Start MCP server (stdio transport) |
 
 All commands accept `--repo` to specify the repository root and `--db` to override the database path.
+
+### Search
+
+FTS5-powered ranked search with BM25 scoring. Handles camelCase, snake_case, and prefix matching.
+Also searches nested YAML spec keys -- `priorityClassName`, `containerPort`, etc.
+
+```bash
+code-rosetta search "collector" -g quantlane
+code-rosetta search "priorityClassName" -g quantlane
+code-rosetta search "CalendarLoader" -g quantlane --kind Class
+code-rosetta search "deploy" -g quantlane --language python -n 50
+```
+
+### Graph queries
+
+```bash
+code-rosetta query callers_of "path::ClassName" --group quantlane
+code-rosetta query callees_of "path::function_name" --group quantlane
+code-rosetta query imports_of "path/to/file.py" --group quantlane
+code-rosetta query references_to "resource.name" --group quantlane
+code-rosetta query cross_language --group quantlane
+```
+
+### Review context
+
+```bash
+code-rosetta review-context --group quantlane --base HEAD~3
+code-rosetta review-context --group quantlane --files "path/a.tf,path/b.py"
+```
+
+### Visualization
+
+Generates a self-contained HTML file with an interactive D3.js force-directed graph.
+
+```bash
+# Neighborhood of a specific node
+code-rosetta viz -g quantlane -t "path::ClassName" -d 2
+
+# Impact radius of changed files
+code-rosetta viz -g quantlane -f "path/a.py,path/b.tf"
+
+# Overview of most-connected hubs
+code-rosetta viz -g quantlane
+
+# Save to specific file without opening browser
+code-rosetta viz -g quantlane -t "path::ClassName" -o graph.html --no-open
+```
 
 ## MCP tools
 
@@ -166,6 +218,24 @@ When you change a file, Code Rosetta traces the impact through the graph using B
 - **Structural edges** (CONTAINS) are only used for seeding — finding nodes in the changed file — but never for fan-out during traversal
 
 This prevents a change in `main.tf` from falsely impacting every resource in the repo just because they're all contained in files referenced by `main.tf`.
+
+## Changelog
+
+### 0.2.0 (2026-05-20)
+
+**New CLI commands:** `search`, `query`, `review-context`, `viz`, `rebuild-fts`
+
+- **FTS5 ranked search** -- BM25 scoring, camelCase/snake_case tokenization, prefix matching. Falls back to LIKE if FTS5 is unavailable.
+- **YAML keyword indexing** -- all nested keys from K8s docs (e.g. `priorityClassName`, `containerPort`) are extracted and searchable via FTS.
+- **Graph queries via CLI** -- `callers_of`, `callees_of`, `imports_of`, `importers_of`, `children_of`, `tests_for`, `inheritors_of`, `file_summary`, `references_to`, `cross_language`.
+- **Review context** -- generates impact-aware review context for changed files.
+- **Interactive visualization** -- self-contained HTML with D3.js force-directed graph. Dark theme, color-coded nodes/edges, click-to-highlight, search filter, zoom/drag.
+- **Auto FTS migration** -- detects old FTS schema and rebuilds automatically.
+- **FTS auto-rebuild** -- `build-group` rebuilds the FTS index after every build.
+
+### 0.1.0
+
+Initial release. Parsers for Python, Terraform/HCL, YAML, Jinja2. SQLite + NetworkX graph. MCP server. Incremental builds. Cross-language edge detection.
 
 ## Architecture
 

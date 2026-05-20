@@ -272,6 +272,108 @@ class GraphStore:
     def commit(self) -> None:
         self._conn.commit()
 
+    def resolve_cross_file_calls(self) -> int:
+        """Resolve module-qualified CALLS targets to file-qualified node names.
+
+        After parsing, CALLS targets from the Python parser look like
+        'candle_api.models.CalendarEventType'. This pass maps them to
+        actual node qualified names like '/path/to/models.py::CalendarEventType'.
+
+        Returns the number of edges resolved.
+        """
+        import logging
+        log = logging.getLogger(__name__)
+
+        # Build module_path -> file_path mapping from all Python files
+        # e.g. 'candle_api.models' -> '/full/path/candle_api/models.py'
+        files = self._conn.execute(
+            "SELECT file_path FROM nodes WHERE language='python' AND kind='File'"
+        ).fetchall()
+
+        # Breakpoints: dirs that are repo roots or src dirs, not part of module path
+        breakpoints = {"master", "main", "src", "lib", "tests", "test"}
+
+        module_to_file: dict[str, str] = {}
+        for r in files:
+            fp = r["file_path"]
+            parts = []
+            for part in reversed(Path(fp).with_suffix("").parts):
+                if part in breakpoints:
+                    break
+                parts.insert(0, part)
+                mod_path = ".".join(parts)
+                module_to_file[mod_path] = fp
+
+        if not module_to_file:
+            return 0
+
+        # Build name -> [(qualified_name, file_path)] index for fast lookup
+        node_index: dict[str, list[tuple[str, str]]] = {}
+        for row in self._conn.execute(
+            "SELECT name, qualified_name, file_path FROM nodes WHERE language='python'"
+        ).fetchall():
+            node_index.setdefault(row["name"], []).append(
+                (row["qualified_name"], row["file_path"])
+            )
+
+        # Find all unresolved CALLS with dots (module-qualified)
+        unresolved = self._conn.execute(
+            "SELECT id, target_qualified FROM edges "
+            "WHERE kind='CALLS' "
+            "AND target_qualified LIKE '%.%' "
+            "AND target_qualified NOT LIKE '/%'"
+        ).fetchall()
+
+        resolved_count = 0
+        for row in unresolved:
+            target = row["target_qualified"]
+            # Try splitting at each dot from the right:
+            # 'candle_api.models.CalendarEventType' -> module='candle_api.models', name='CalendarEventType'
+            # 'candle_api.models.CalendarEventType.method' -> try progressively
+            parts = target.split(".")
+            found = False
+            for split_at in range(len(parts) - 1, 0, -1):
+                mod = ".".join(parts[:split_at])
+                name = ".".join(parts[split_at:])
+                fp = module_to_file.get(mod)
+                if not fp:
+                    continue
+                # Look for a node with this name in this file
+                candidates = node_index.get(name, [])
+                for qn, node_fp in candidates:
+                    if node_fp == fp:
+                        self._conn.execute(
+                            "UPDATE edges SET target_qualified = ? WHERE id = ?",
+                            (qn, row["id"]),
+                        )
+                        resolved_count += 1
+                        found = True
+                        break
+                if found:
+                    break
+                # Also try just the last part (e.g. method name without class)
+                last_name = parts[-1]
+                if last_name != name:
+                    candidates = node_index.get(last_name, [])
+                    for qn, node_fp in candidates:
+                        if node_fp == fp:
+                            self._conn.execute(
+                                "UPDATE edges SET target_qualified = ? WHERE id = ?",
+                                (qn, row["id"]),
+                            )
+                            resolved_count += 1
+                            found = True
+                            break
+                if found:
+                    break
+
+        if resolved_count:
+            self._conn.commit()
+            self._invalidate_cache()
+            log.info("Cross-file call resolution: %d edges resolved", resolved_count)
+
+        return resolved_count
+
     # --- Read operations ---
 
     def get_node(self, qualified_name: str) -> Optional[GraphNode]:

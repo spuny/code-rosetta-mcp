@@ -233,6 +233,11 @@ def build_group(group_name):
             f"{stats.files_count} files, languages: {', '.join(stats.languages)}"
         )
 
+        # Resolve cross-file calls (module paths -> file-qualified names)
+        resolved = store.resolve_cross_file_calls()
+        if resolved:
+            click.echo(f"Cross-file call resolution: {resolved} edges resolved.")
+
         # Rebuild FTS index after build
         if store._has_fts():
             store.rebuild_fts()

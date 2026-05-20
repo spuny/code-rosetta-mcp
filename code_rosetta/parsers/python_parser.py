@@ -73,6 +73,94 @@ def _return_type_text(return_type_node, source: bytes) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Scope context for call resolution
+# ---------------------------------------------------------------------------
+
+class _FileScope:
+    """Tracks imports and local definitions for resolving call targets."""
+
+    def __init__(self, file_path: str) -> None:
+        self.file_path = file_path
+        # import alias -> module path (e.g. 'pd' -> 'pandas', 'Path' -> 'pathlib.Path')
+        self.import_map: dict[str, str] = {}
+        # local names defined in this file -> qualified name
+        self.local_defs: dict[str, str] = {}
+        # class names defined in this file
+        self.classes: set[str] = set()
+
+    def register_import(self, alias: str, module_path: str) -> None:
+        self.import_map[alias] = module_path
+
+    def register_def(self, name: str, qualified_name: str) -> None:
+        self.local_defs[name] = qualified_name
+
+    def register_class(self, name: str) -> None:
+        self.classes.add(name)
+
+    def resolve_call(self, raw_target: str, enclosing_class: str) -> str:
+        """Resolve a raw call target to a qualified name.
+
+        Resolution order:
+        1. self.method() -> EnclosingClass.method (same-file method)
+        2. bare_name() -> same-file definition if exists
+        3. bare_name() -> imported name if exists
+        4. obj.method() -> if obj is an imported module, resolve to module.method
+        5. ClassName.method() -> if ClassName is local, resolve to file-qualified
+        6. Fall through -> return raw target unchanged
+        """
+        # 1. self.method() -> resolve to enclosing class method
+        if raw_target.startswith("self.") and enclosing_class:
+            method = raw_target[5:]  # strip 'self.'
+            # Could be chained: self.foo.bar -- only resolve self.method
+            if "." not in method:
+                local_key = f"{enclosing_class}.{method}"
+                if local_key in self.local_defs:
+                    return self.local_defs[local_key]
+                # Method might not be defined yet (forward ref) -- construct qualified name
+                return make_qualified(self.file_path, "Method", local_key)
+            # self.foo.bar -- can't resolve further
+            return raw_target
+
+        # 2. cls.method() for classmethods
+        if raw_target.startswith("cls.") and enclosing_class:
+            method = raw_target[4:]
+            if "." not in method:
+                local_key = f"{enclosing_class}.{method}"
+                if local_key in self.local_defs:
+                    return self.local_defs[local_key]
+                return make_qualified(self.file_path, "Method", local_key)
+            return raw_target
+
+        # 3. bare name -> same-file definition
+        if "." not in raw_target and raw_target in self.local_defs:
+            return self.local_defs[raw_target]
+
+        # 4. bare name -> imported name
+        if "." not in raw_target and raw_target in self.import_map:
+            return self.import_map[raw_target]
+
+        # 5. dotted: obj.method()
+        if "." in raw_target:
+            parts = raw_target.split(".", 1)
+            prefix, rest = parts[0], parts[1]
+
+            # prefix is a local class -> resolve to class.method in this file
+            if prefix in self.classes:
+                local_key = f"{prefix}.{rest}"
+                if local_key in self.local_defs:
+                    return self.local_defs[local_key]
+                # Assume it's a method
+                return make_qualified(self.file_path, "Method", local_key)
+
+            # prefix is an imported module/name -> resolve to module.rest
+            if prefix in self.import_map:
+                return f"{self.import_map[prefix]}.{rest}"
+
+        # 6. Can't resolve -- return as-is
+        return raw_target
+
+
+# ---------------------------------------------------------------------------
 # Main parser class
 # ---------------------------------------------------------------------------
 
@@ -95,6 +183,7 @@ class PythonParser:
 
         nodes: list[NodeInfo] = []
         edges: list[EdgeInfo] = []
+        scope = _FileScope(fp)
 
         # File node
         file_node = NodeInfo(
@@ -121,6 +210,7 @@ class PythonParser:
             is_test_file=is_test_file,
             nodes=nodes,
             edges=edges,
+            scope=scope,
         )
 
         return nodes, edges
@@ -141,26 +231,27 @@ class PythonParser:
         is_test_file: bool,
         nodes: list[NodeInfo],
         edges: list[EdgeInfo],
+        scope: _FileScope | None = None,
     ) -> None:
         for node in body_nodes:
             if node.type in ("function_definition", "async_function_def"):
                 self._handle_function(
                     node, [], source, fp, file_qualified, parent_qualified,
-                    parent_name, context, is_test_file, nodes, edges,
+                    parent_name, context, is_test_file, nodes, edges, scope,
                 )
             elif node.type == "decorated_definition":
                 self._handle_decorated(
                     node, source, fp, file_qualified, parent_qualified,
-                    parent_name, context, is_test_file, nodes, edges,
+                    parent_name, context, is_test_file, nodes, edges, scope,
                 )
             elif node.type == "class_definition":
                 self._handle_class(
                     node, [], source, fp, file_qualified, parent_qualified,
-                    parent_name, is_test_file, nodes, edges,
+                    parent_name, is_test_file, nodes, edges, scope,
                 )
             elif node.type in ("import_statement", "import_from_statement"):
                 self._handle_import(
-                    node, source, fp, parent_qualified, edges,
+                    node, source, fp, parent_qualified, edges, scope,
                 )
             elif node.type == "expression_statement":
                 # Could contain calls at module/class level
@@ -168,6 +259,7 @@ class PythonParser:
                     if child.type == "call":
                         self._collect_calls(
                             child, source, fp, parent_qualified, edges,
+                            scope, parent_name if context == "class" else "",
                         )
             elif node.type == "assignment":
                 # Handle calls on the right-hand side
@@ -175,6 +267,7 @@ class PythonParser:
                 if value and value.type == "call":
                     self._collect_calls(
                         value, source, fp, parent_qualified, edges,
+                        scope, parent_name if context == "class" else "",
                     )
 
     # ------------------------------------------------------------------
@@ -193,6 +286,7 @@ class PythonParser:
         is_test_file: bool,
         nodes: list[NodeInfo],
         edges: list[EdgeInfo],
+        scope: _FileScope | None = None,
     ) -> None:
         decorators = _collect_decorators(node, source)
         # Find the inner definition
@@ -206,12 +300,12 @@ class PythonParser:
         if inner.type == "class_definition":
             self._handle_class(
                 inner, decorators, source, fp, file_qualified, parent_qualified,
-                parent_name, is_test_file, nodes, edges,
+                parent_name, is_test_file, nodes, edges, scope,
             )
         else:
             self._handle_function(
                 inner, decorators, source, fp, file_qualified, parent_qualified,
-                parent_name, context, is_test_file, nodes, edges,
+                parent_name, context, is_test_file, nodes, edges, scope,
             )
 
     # ------------------------------------------------------------------
@@ -230,6 +324,7 @@ class PythonParser:
         is_test_file: bool,
         nodes: list[NodeInfo],
         edges: list[EdgeInfo],
+        scope: _FileScope | None = None,
     ) -> None:
         name_node = _get_child_by_field(node, "name")
         if name_node is None:
@@ -253,6 +348,11 @@ class PythonParser:
             is_test=is_test_file,
         )
         nodes.append(class_node)
+
+        # Register in scope
+        if scope:
+            scope.register_def(class_name, qualified)
+            scope.register_class(class_name)
 
         # CONTAINS edge: file -> class
         edges.append(EdgeInfo(
@@ -292,6 +392,7 @@ class PythonParser:
                 is_test_file=is_test_file,
                 nodes=nodes,
                 edges=edges,
+                scope=scope,
             )
 
     # ------------------------------------------------------------------
@@ -311,6 +412,7 @@ class PythonParser:
         is_test_file: bool,
         nodes: list[NodeInfo],
         edges: list[EdgeInfo],
+        scope: _FileScope | None = None,
     ) -> None:
         name_node = _get_child_by_field(node, "name")
         if name_node is None:
@@ -354,6 +456,13 @@ class PythonParser:
         )
         nodes.append(func_node)
 
+        # Register in scope
+        if scope:
+            scope.register_def(symbol_name, qualified)
+            # Also register by bare function name for top-level functions
+            if context == "file":
+                scope.register_def(func_name, qualified)
+
         # CONTAINS edge: parent -> function/method
         edges.append(EdgeInfo(
             kind="CONTAINS",
@@ -372,10 +481,15 @@ class PythonParser:
             # CONTAINS edge we just added above.
             pass
 
+        # Determine enclosing class for self.x resolution
+        enclosing_class = parent_name if context == "class" else ""
+
         # Collect CALLS within the function body
         body = _get_child_by_field(node, "body")
         if body is not None:
-            self._collect_calls_in_subtree(body, source, fp, qualified, edges)
+            self._collect_calls_in_subtree(
+                body, source, fp, qualified, edges, scope, enclosing_class,
+            )
 
             # Recurse for nested functions/classes
             self._visit_body(
@@ -389,6 +503,7 @@ class PythonParser:
                 is_test_file=is_test_file,
                 nodes=nodes,
                 edges=edges,
+                scope=scope,
             )
 
     # ------------------------------------------------------------------
@@ -402,6 +517,7 @@ class PythonParser:
         fp: str,
         source_qualified: str,
         edges: list[EdgeInfo],
+        scope: _FileScope | None = None,
     ) -> None:
         if node.type == "import_statement":
             # import foo, import foo as bar, import foo.bar
@@ -410,8 +526,12 @@ class PythonParser:
                     if child.type == "aliased_import":
                         name_node = child.children[0]  # the module part
                         module = _node_text(name_node, source)
+                        # Get alias: import foo as bar -> alias='bar'
+                        alias_node = child.children[-1] if len(child.children) >= 3 else None
+                        alias = _node_text(alias_node, source) if alias_node else module.split(".")[-1]
                     else:
                         module = _node_text(child, source)
+                        alias = module.split(".")[0]  # import foo.bar -> alias='foo'
                     edges.append(EdgeInfo(
                         kind="IMPORTS",
                         source_qualified=source_qualified,
@@ -420,34 +540,44 @@ class PythonParser:
                         line=node.start_point[0] + 1,
                         extra={"import_type": "module"},
                     ))
+                    if scope:
+                        scope.register_import(alias, module)
 
         elif node.type == "import_from_statement":
             # from foo import bar, baz
             module_node = _get_child_by_field(node, "module_name")
             module = _node_text(module_node, source) if module_node else ""
 
-            # Collect imported names
-            imported_names: list[str] = []
+            # Collect imported names (and their aliases)
+            imported: list[tuple[str, str]] = []  # (name, alias)
             for child in node.children:
                 if child.type == "dotted_name" and child != module_node:
-                    imported_names.append(_node_text(child, source))
+                    name = _node_text(child, source)
+                    imported.append((name, name))
                 elif child.type == "aliased_import":
                     name_node = child.children[0]
-                    imported_names.append(_node_text(name_node, source))
+                    name = _node_text(name_node, source)
+                    alias_node = child.children[-1] if len(child.children) >= 3 else None
+                    alias = _node_text(alias_node, source) if alias_node else name
+                    imported.append((name, alias))
                 elif child.type == "wildcard_import":
-                    imported_names.append("*")
+                    imported.append(("*", "*"))
 
-            if not imported_names:
+            if not imported:
                 # from foo import (...)
                 for child in node.children:
                     if child.type == "import_list":
                         for item in child.children:
                             if item.type in ("dotted_name", "identifier"):
-                                imported_names.append(_node_text(item, source))
+                                name = _node_text(item, source)
+                                imported.append((name, name))
                             elif item.type == "aliased_import":
-                                imported_names.append(_node_text(item.children[0], source))
+                                name = _node_text(item.children[0], source)
+                                alias_node = item.children[-1] if len(item.children) >= 3 else None
+                                alias = _node_text(alias_node, source) if alias_node else name
+                                imported.append((name, alias))
 
-            for name in imported_names:
+            for name, alias in imported:
                 target = f"{module}.{name}" if module and name != "*" else (module or name)
                 edges.append(EdgeInfo(
                     kind="IMPORTS",
@@ -457,6 +587,8 @@ class PythonParser:
                     line=node.start_point[0] + 1,
                     extra={"import_type": "from", "module": module},
                 ))
+                if scope and name != "*":
+                    scope.register_import(alias, target)
 
     # ------------------------------------------------------------------
     # Call collection
@@ -469,27 +601,28 @@ class PythonParser:
         fp: str,
         source_qualified: str,
         edges: list[EdgeInfo],
+        scope: _FileScope | None = None,
+        enclosing_class: str = "",
     ) -> None:
-        """Record a single call node as a CALLS edge."""
+        """Record a single call node as a CALLS edge, resolving through scope."""
         func_node = _get_child_by_field(call_node, "function")
         if func_node is None:
             return
 
-        if func_node.type == "identifier":
-            callee = _node_text(func_node, source)
-        elif func_node.type == "attribute":
-            # e.g. self.foo() or obj.method()
-            callee = _node_text(func_node, source)
-        else:
-            callee = _node_text(func_node, source)
-
-        if not callee:
+        raw_callee = _node_text(func_node, source)
+        if not raw_callee:
             return
+
+        # Resolve through scope
+        if scope:
+            resolved = scope.resolve_call(raw_callee, enclosing_class)
+        else:
+            resolved = raw_callee
 
         edges.append(EdgeInfo(
             kind="CALLS",
             source_qualified=source_qualified,
-            target_qualified=callee,
+            target_qualified=resolved,
             file_path=fp,
             line=call_node.start_point[0] + 1,
         ))
@@ -501,6 +634,8 @@ class PythonParser:
         fp: str,
         source_qualified: str,
         edges: list[EdgeInfo],
+        scope: _FileScope | None = None,
+        enclosing_class: str = "",
         _depth: int = 0,
     ) -> None:
         """Walk a subtree and collect all call expressions, skipping nested defs."""
@@ -512,17 +647,21 @@ class PythonParser:
             return
 
         if node.type == "call":
-            self._collect_calls(node, source, fp, source_qualified, edges)
-            # Still recurse — arguments may contain further calls
+            self._collect_calls(
+                node, source, fp, source_qualified, edges, scope, enclosing_class,
+            )
+            # Still recurse -- arguments may contain further calls
             for child in node.children:
                 self._collect_calls_in_subtree(
-                    child, source, fp, source_qualified, edges, _depth + 1
+                    child, source, fp, source_qualified, edges,
+                    scope, enclosing_class, _depth + 1,
                 )
             return
 
         for child in node.children:
             self._collect_calls_in_subtree(
-                child, source, fp, source_qualified, edges, _depth + 1
+                child, source, fp, source_qualified, edges,
+                scope, enclosing_class, _depth + 1,
             )
 
 

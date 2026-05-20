@@ -168,9 +168,11 @@ When running as an MCP server, the following tools are available:
 | `build_or_update_graph_tool` | Build or incrementally update the graph |
 | `get_impact_radius_tool` | Blast radius analysis for changed files |
 | `query_graph_tool` | Predefined graph queries (callers, callees, imports, references, cross-language) |
-| `search_nodes_tool` | Search nodes by name, kind, or language |
+| `search_nodes_tool` | FTS5 ranked search by name, kind, language, or YAML spec keys |
 | `list_graph_stats_tool` | Graph statistics |
 | `get_review_context_tool` | Token-efficient review context with source snippets |
+
+**Note:** `search_nodes_tool` uses the same FTS5 engine as the CLI `search` command -- BM25 ranking, camelCase/snake_case tokenization, and YAML keyword search all work through MCP. Visualization (`viz`) and FTS index management (`rebuild-fts`) are CLI-only.
 
 ### Query patterns
 

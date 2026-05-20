@@ -20,12 +20,14 @@ def _ensure_parsers():
     from .parsers.yaml_parser import yaml_parser
     from .parsers.jinja_parser import jinja2_parser
     from .parsers.dockerfile_parser import dockerfile_parser
+    from .parsers.bash_parser import bash_parser
 
     register_parser(python_parser)
     register_parser(hcl_parser)
     register_parser(yaml_parser)
     register_parser(jinja2_parser)
     register_parser(dockerfile_parser)
+    register_parser(bash_parser)
 
 
 def _resolve_db(repo: str | None = None, db: str | None = None) -> tuple[Path, Path | None]:

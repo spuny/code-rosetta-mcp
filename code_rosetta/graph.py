@@ -367,10 +367,53 @@ class GraphStore:
                 if found:
                     break
 
+        # Also resolve READS_CONFIG edges (Go template values:: -> values.yaml sections)
+        values_edges = self._conn.execute(
+            "SELECT id, target_qualified, file_path FROM edges "
+            "WHERE kind='READS_CONFIG' AND target_qualified LIKE 'values::%'"
+        ).fetchall()
+        for row in values_edges:
+            key_name = row["target_qualified"].split("::", 1)[1]
+            src_dir = Path(row["file_path"]).parent
+            # Walk up directory tree to find values.yaml
+            for parent in (src_dir, src_dir.parent, src_dir.parent.parent):
+                values_path = str(parent / "values.yaml")
+                match = self._conn.execute(
+                    "SELECT qualified_name FROM nodes "
+                    "WHERE file_path=? AND kind='Section' AND name=?",
+                    (values_path, key_name),
+                ).fetchone()
+                if match:
+                    self._conn.execute(
+                        "UPDATE edges SET target_qualified = ? WHERE id = ?",
+                        (match["qualified_name"], row["id"]),
+                    )
+                    resolved_count += 1
+                    break
+
+        # Resolve gotemplate:: references (include/template calls -> Template nodes)
+        gotemplate_edges = self._conn.execute(
+            "SELECT id, target_qualified, file_path FROM edges "
+            "WHERE kind='CALLS' AND target_qualified LIKE 'gotemplate::%'"
+        ).fetchall()
+        for row in gotemplate_edges:
+            tpl_name = row["target_qualified"].split("::", 1)[1]
+            # Find Template node with this name anywhere in the graph
+            match = self._conn.execute(
+                "SELECT qualified_name FROM nodes WHERE kind='Template' AND name=?",
+                (tpl_name,),
+            ).fetchone()
+            if match:
+                self._conn.execute(
+                    "UPDATE edges SET target_qualified = ? WHERE id = ?",
+                    (match["qualified_name"], row["id"]),
+                )
+                resolved_count += 1
+
         if resolved_count:
             self._conn.commit()
             self._invalidate_cache()
-            log.info("Cross-file call resolution: %d edges resolved", resolved_count)
+            log.info("Cross-file resolution: %d edges resolved", resolved_count)
 
         return resolved_count
 

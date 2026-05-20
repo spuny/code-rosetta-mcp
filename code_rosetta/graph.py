@@ -316,10 +316,10 @@ class GraphStore:
                 (row["qualified_name"], row["file_path"])
             )
 
-        # Find all unresolved CALLS with dots (module-qualified)
+        # Find all unresolved CALLS and INHERITS with dots (module-qualified)
         unresolved = self._conn.execute(
             "SELECT id, target_qualified FROM edges "
-            "WHERE kind='CALLS' "
+            "WHERE kind IN ('CALLS', 'INHERITS') "
             "AND target_qualified LIKE '%.%' "
             "AND target_qualified NOT LIKE '/%'"
         ).fetchall()

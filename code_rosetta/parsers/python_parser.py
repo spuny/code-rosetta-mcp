@@ -369,11 +369,15 @@ class PythonParser:
             for base in bases_node.children:
                 if base.type in ("identifier", "attribute"):
                     base_name = _node_text(base, source)
-                    # Target qualified is just the bare name; cross-ref pass can resolve
+                    # Resolve through scope (same as calls)
+                    if scope:
+                        resolved_base = scope.resolve_call(base_name, "")
+                    else:
+                        resolved_base = base_name
                     edges.append(EdgeInfo(
                         kind="INHERITS",
                         source_qualified=qualified,
-                        target_qualified=base_name,
+                        target_qualified=resolved_base,
                         file_path=fp,
                         line=base.start_point[0] + 1,
                     ))

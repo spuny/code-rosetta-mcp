@@ -34,12 +34,13 @@ _KIND_COLORS = {
 
 # Edge colors by kind
 _EDGE_COLORS = {
-    "CALLS": "#666",
-    "IMPORTS": "#999",
+    "CALLS": "#8CB4E0",
+    "IMPORTS": "#A8D8A8",
     "INHERITS": "#E91E63",
     "REFERENCES": "#FF9800",
     "USES_VARIABLE": "#FFC107",
     "PASSES_VAR": "#CDDC39",
+    "CONTAINS": "#555",
 }
 
 
@@ -131,7 +132,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   #tooltip .tt-kind { color: #9b2335; margin-left: 6px; }
   #tooltip .tt-file { color: #888; margin-top: 4px; word-break: break-all; }
   svg { width: 100vw; height: 100vh; }
-  .link { stroke-opacity: 0.4; }
+  .link { stroke-opacity: 0.8; }
   .link:hover { stroke-opacity: 1; }
   .node circle { stroke: #fff; stroke-width: 1.5; cursor: pointer; }
   .node text { fill: #ccc; font-size: 11px; pointer-events: none; }
@@ -162,9 +163,13 @@ const data = __GRAPH_DATA__;
 document.getElementById('stat-nodes').textContent = `Nodes: ${data.nodes.length}`;
 document.getElementById('stat-edges').textContent = `Edges: ${data.links.length}`;
 
-// Build legend from unique kinds
+// Build node kind legend
 const kinds = [...new Set(data.nodes.map(n => n.kind))].sort();
 const legend = document.getElementById('legend');
+const nodeLabel = document.createElement('div');
+nodeLabel.style.cssText = 'color:#888; font-size:11px; margin-bottom:4px; margin-top:2px;';
+nodeLabel.textContent = 'Nodes';
+legend.appendChild(nodeLabel);
 kinds.forEach(k => {
   const color = data.nodes.find(n => n.kind === k)?.color || '#999';
   const item = document.createElement('span');
@@ -172,6 +177,22 @@ kinds.forEach(k => {
   item.innerHTML = `<span class="dot" style="background:${color}"></span>${k}`;
   legend.appendChild(item);
 });
+
+// Build edge kind legend
+const edgeKinds = [...new Set(data.links.map(l => l.kind))].sort();
+if (edgeKinds.length > 0) {
+  const edgeLabel = document.createElement('div');
+  edgeLabel.style.cssText = 'color:#888; font-size:11px; margin-bottom:4px; margin-top:8px;';
+  edgeLabel.textContent = 'Edges';
+  legend.appendChild(edgeLabel);
+  edgeKinds.forEach(k => {
+    const color = data.links.find(l => l.kind === k)?.color || '#ccc';
+    const item = document.createElement('span');
+    item.className = 'item';
+    item.innerHTML = `<span class="dot" style="background:${color}; border-radius:2px; width:16px; height:3px;"></span>${k}`;
+    legend.appendChild(item);
+  });
+}
 
 const svg = d3.select('svg');
 const width = window.innerWidth;

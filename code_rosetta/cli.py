@@ -478,7 +478,7 @@ def viz(group, target, files, depth, output, no_open, repo, db):
                     sys.exit(1)
 
             title = f"Neighborhood: {node.name}"
-            # Collect neighbors up to depth
+            # Collect neighbors up to depth -- include CONTAINS for structure
             visited_qns = {node.qualified_name}
             frontier = {node.qualified_name}
             all_edges = []
@@ -487,13 +487,16 @@ def viz(group, target, files, depth, output, no_open, repo, db):
                 next_frontier = set()
                 for qn in frontier:
                     for e in store.get_edges_by_source(qn):
-                        if e.kind != "CONTAINS":
+                        # Only follow edges where target is a real node
+                        target_node = store.get_node(e.target_qualified)
+                        if target_node:
                             all_edges.append(e)
                             if e.target_qualified not in visited_qns:
                                 visited_qns.add(e.target_qualified)
                                 next_frontier.add(e.target_qualified)
                     for e in store.get_edges_by_target(qn):
-                        if e.kind != "CONTAINS":
+                        source_node = store.get_node(e.source_qualified)
+                        if source_node:
                             all_edges.append(e)
                             if e.source_qualified not in visited_qns:
                                 visited_qns.add(e.source_qualified)

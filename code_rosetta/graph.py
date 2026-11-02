@@ -66,7 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file_path);
 
 _FTS_SCHEMA_SQL = (
     "CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5"
-    '(name, qualified_name, tokenize="unicode61", content=nodes, content_rowid=id)'
+    '(name, qualified_name, keywords, tokenize="unicode61")'
 )
 
 
@@ -139,8 +139,9 @@ class GraphStore:
             row = self._conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='nodes_fts'"
             ).fetchone()
-            if row and "keywords" not in (row[0] or ""):
-                # Old schema without keywords column -- drop and recreate
+            sql = (row[0] or "") if row else ""
+            if row and ("keywords" not in sql or "content=nodes" in sql):
+                # Old external-content schema has no keywords column -- drop and recreate
                 for t in ("nodes_fts", "nodes_fts_data", "nodes_fts_idx",
                           "nodes_fts_content", "nodes_fts_docsize", "nodes_fts_config"):
                     self._conn.execute(f"DROP TABLE IF EXISTS {t}")
@@ -161,7 +162,9 @@ class GraphStore:
         """Rebuild the FTS index from the nodes table, including keywords from extra."""
         if not self._has_fts():
             return
-        self._conn.execute("DELETE FROM nodes_fts")
+        # Recreate instead of DELETE: a DELETE on a stale FTS5 index can fail as "malformed".
+        self._conn.execute("DROP TABLE IF EXISTS nodes_fts")
+        self._conn.execute(_FTS_SCHEMA_SQL)
         rows = self._conn.execute(
             "SELECT id, name, qualified_name, extra FROM nodes"
         ).fetchall()
@@ -170,7 +173,8 @@ class GraphStore:
             self._conn.execute(
                 "INSERT INTO nodes_fts(rowid, name, qualified_name, keywords) "
                 "VALUES (?, ?, ?, ?)",
-                (r["id"], r["name"], r["qualified_name"], keywords),
+                (r["id"], _index_text(r["name"]), _index_text(r["qualified_name"]),
+                 _index_text(keywords)),
             )
         self._conn.commit()
 
@@ -771,6 +775,13 @@ def _tokenize_query(query: str) -> list[str]:
             if t and len(t) >= 2:
                 tokens.append(t)
     return tokens
+
+
+def _index_text(s: str | None) -> str:
+    """Original text plus its query tokens, so camelCase parts match prefix queries."""
+    if not s:
+        return ""
+    return f"{s} {' '.join(_tokenize_query(s))}"
 
 
 def _sanitize_name(s: str, max_len: int = 256) -> str:

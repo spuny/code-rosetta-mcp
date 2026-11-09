@@ -16,6 +16,7 @@ from typing import Optional
 
 import json as _json
 
+from .content import sync_repo as sync_content
 from .crossref import cross_reference_detector
 from .graph import GraphStore
 from .models import EdgeInfo, NodeInfo
@@ -281,6 +282,7 @@ def full_build(repo_root: Path, store: GraphStore) -> dict:
         logger.warning("Cross-reference detection failed: %s", e)
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
+    content_stats = sync_content(store, repo_root)
     store.set_metadata("last_build_type", "full")
     store.commit()
 
@@ -289,6 +291,7 @@ def full_build(repo_root: Path, store: GraphStore) -> dict:
         "total_nodes": total_nodes,
         "total_edges": total_edges,
         "cross_ref_edges": len(xref_edges) if 'xref_edges' in dir() else 0,
+        "content": content_stats,
         "errors": errors,
     }
 
@@ -356,6 +359,7 @@ def incremental_update(
             errors.append({"file": rel_path, "error": str(e)})
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
+    content_stats = sync_content(store, repo_root)
     store.set_metadata("last_build_type", "incremental")
     store.commit()
 
@@ -365,5 +369,6 @@ def incremental_update(
         "total_edges": total_edges,
         "changed_files": list(changed_files),
         "dependent_files": list(dependent_files),
+        "content": content_stats,
         "errors": errors,
     }

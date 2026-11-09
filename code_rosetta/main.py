@@ -10,6 +10,7 @@ from .tools import (
     build_or_update_graph,
     get_impact_radius,
     get_review_context,
+    grep_content,
     list_graph_stats,
     query_graph,
     search_nodes,
@@ -191,6 +192,40 @@ def get_review_context_tool(
         include_source=include_source, max_lines_per_file=max_lines_per_file,
         repo_root=repo_root or _default_repo_root, base=base,
         group=group,
+    )
+
+
+@mcp.tool()
+def grep_code_tool(
+    pattern: str,
+    regex: bool = False,
+    ignore_case: bool = False,
+    path_glob: Optional[str] = None,
+    limit: int = 100,
+    files_only: bool = False,
+    repo_root: Optional[str] = None,
+    group: Optional[str] = None,
+) -> dict:
+    """Grep file contents across every tracked text file, any language.
+
+    Use for literal strings, env vars, image names, URLs, error messages and
+    "is X anywhere in code". Use search_nodes_tool / query_graph_tool for
+    structure (who calls, what references).
+
+    Args:
+        pattern: Literal text, or a Python regex when regex=True.
+        regex: Treat pattern as a regex.
+        ignore_case: Case-insensitive match.
+        path_glob: fnmatch filter on the absolute path, e.g. "*/infra*/cluster/*".
+        limit: Max matching lines (or files with files_only). Default: 100.
+        files_only: Return matching file paths only.
+        repo_root: Repository root path. Auto-detected if omitted.
+        group: Named config group. Searches across all repos in the group.
+    """
+    return grep_content(
+        pattern=pattern, regex=regex, ignore_case=ignore_case,
+        path_glob=path_glob, limit=limit, files_only=files_only,
+        repo_root=repo_root or _default_repo_root, group=group,
     )
 
 

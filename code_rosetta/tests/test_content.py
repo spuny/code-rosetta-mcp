@@ -88,3 +88,16 @@ def test_full_build_populates_content(tmp_path, repo):
 ])
 def test_required_literal(pattern, expected):
     assert _required_literal(pattern) == expected
+
+
+def test_incremental_update_refreshes_content(tmp_path, repo):
+    from code_rosetta.incremental import full_build, incremental_update
+
+    with GraphStore(tmp_path / "g.db") as store:
+        full_build(repo, store)
+        (repo / "deploy.yaml").write_text("spec:\n  image: ghcr.io/other/app:v1\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        result = incremental_update(repo, store, changed_files=["deploy.yaml"])
+        assert result["content"]["indexed"] == 1
+        assert grep(store, "sourcebot-dev")["files"] == []
+        assert grep(store, "ghcr.io/other")["files"] == [str(repo / "deploy.yaml")]

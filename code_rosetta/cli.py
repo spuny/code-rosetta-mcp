@@ -465,6 +465,60 @@ def search(query, group, kind, language, limit, json_output, repo, db):
                 click.echo()
 
 
+@main.command()
+@click.argument("pattern")
+@click.option("--group", "-g", default=None, help="Config group to search")
+@click.option("--regex", "-E", is_flag=True, help="Treat PATTERN as a regex")
+@click.option("--ignore-case", "-i", is_flag=True, help="Case-insensitive")
+@click.option("--path", "path_glob", default=None, help="fnmatch filter on absolute path")
+@click.option("--files-only", "-l", is_flag=True, help="Print matching file paths only")
+@click.option("--limit", "-n", default=100, help="Max matching lines/files (default 100)")
+@click.option("--json-output", is_flag=True, help="Output as JSON")
+@click.option("--repo", default=None, help="Repository root (auto-detected)")
+@click.option("--db", default=None, help="Path to graph database")
+def grep(pattern, group, regex, ignore_case, path_glob, files_only, limit, json_output, repo, db):
+    """Search file contents of every indexed text file.
+
+    Examples:
+        code-rosetta grep FORCE_ENABLE_ANONYMOUS_ACCESS -g quantlane
+        code-rosetta grep -E 'image:\\s*ghcr\\.io/.+' -g quantlane -l
+        code-rosetta grep runAsUser -g quantlane --path '*/objects*'
+    """
+    from .content import grep as content_grep
+    from .graph import GraphStore
+
+    if group:
+        from .config import cfg
+        db_path = cfg.get_group_db(group)
+        if db_path is None:
+            click.echo(f"Unknown group '{group}'.", err=True)
+            sys.exit(1)
+    else:
+        db_path, _ = _resolve_db(repo, db)
+
+    if not db_path.exists():
+        click.echo("No graph found. Run 'code-rosetta build' first.", err=True)
+        sys.exit(1)
+
+    with GraphStore(db_path) as store:
+        res = content_grep(store, pattern, regex=regex, ignore_case=ignore_case,
+                           path_glob=path_glob, limit=limit, files_only=files_only)
+    if json_output:
+        click.echo(json.dumps(res, indent=2))
+        return
+    if res["status"] != "ok":
+        click.echo(res["error"], err=True)
+        sys.exit(1)
+    if files_only:
+        for f in res["files"]:
+            click.echo(f)
+    else:
+        for m in res["matches"]:
+            click.echo(f"{m['path']}:{m['line']}: {m['text']}")
+    if res["truncated"]:
+        click.echo(f"... truncated at {limit}", err=True)
+
+
 @main.command("rebuild-fts")
 @click.option("--group", "-g", default=None, help="Config group")
 @click.option("--repo", default=None, help="Repository root")

@@ -104,6 +104,7 @@ code-rosetta build     # build the graph
 | `code-rosetta status` | Show graph statistics |
 | `code-rosetta groups` | List configured graph groups |
 | `code-rosetta search <query>` | FTS5 ranked search with camelCase/snake_case support |
+| `code-rosetta grep <pattern>` | Full-text / regex (`-E`) search over every tracked text file, any language |
 | `code-rosetta query <pattern> <target>` | Graph queries (callers_of, callees_of, imports_of, ...) |
 | `code-rosetta review-context` | Generate review context for changed files |
 | `code-rosetta viz` | Interactive D3.js graph visualization |
@@ -169,10 +170,13 @@ When running as an MCP server, the following tools are available:
 | `get_impact_radius_tool` | Blast radius analysis for changed files |
 | `query_graph_tool` | Predefined graph queries (callers, callees, imports, references, cross-language) |
 | `search_nodes_tool` | FTS5 ranked search by name, kind, language, or YAML spec keys |
+| `grep_code_tool` | Full-text / regex search over file contents (literals, env vars, image names, URLs) |
 | `list_graph_stats_tool` | Graph statistics |
 | `get_review_context_tool` | Token-efficient review context with source snippets |
 
 **Note:** `search_nodes_tool` uses the same FTS5 engine as the CLI `search` command -- BM25 ranking, camelCase/snake_case tokenization, and YAML keyword search all work through MCP. Visualization (`viz`) and FTS index management (`rebuild-fts`) are CLI-only.
+
+**Names vs text:** `search` / `search_nodes_tool` match node names and YAML keys only -- a string inside a value, comment or unparsed file returns nothing there. Use `grep` / `grep_code_tool` for text. The content index (SQLite FTS5 trigram, files up to 1 MB, binaries skipped) is refreshed on every build and skips unchanged files by hash.
 
 ### Query patterns
 

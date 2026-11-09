@@ -386,6 +386,29 @@ def search_nodes(
         store.close()
 
 
+# --- Tool: grep_content ---
+
+def grep_content(
+    pattern: str,
+    regex: bool = False,
+    ignore_case: bool = False,
+    path_glob: str | None = None,
+    limit: int = 100,
+    files_only: bool = False,
+    repo_root: str | None = None,
+    group: str | None = None,
+) -> dict[str, Any]:
+    """Full-text or regex search over every indexed text file."""
+    from .content import grep
+
+    store, _, _ = _resolve_store(group=group, repo_root=repo_root)
+    try:
+        return grep(store, pattern, regex=regex, ignore_case=ignore_case,
+                    path_glob=path_glob, limit=limit, files_only=files_only)
+    finally:
+        store.close()
+
+
 # --- Tool 5: list_graph_stats ---
 
 def list_graph_stats(

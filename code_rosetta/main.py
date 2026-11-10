@@ -229,11 +229,30 @@ def grep_code_tool(
     )
 
 
-def main(repo_root: str | None = None) -> None:
-    """Run the MCP server via stdio."""
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(_request):
+    from starlette.responses import PlainTextResponse
+
+    return PlainTextResponse("ok")
+
+
+def main(
+    repo_root: str | None = None,
+    transport: str = "stdio",
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    read_only: bool = False,
+) -> None:
+    """Run the MCP server (stdio by default, or streamable HTTP)."""
     global _default_repo_root
     _default_repo_root = repo_root
-    mcp.run(transport="stdio")
+    if read_only:
+        # Shared server: the index is owned by sync-gitlab, clients must not rebuild it.
+        mcp.remove_tool("build_or_update_graph_tool")
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        mcp.run(transport="http", host=host, port=port, path="/mcp", stateless_http=True)
 
 
 if __name__ == "__main__":

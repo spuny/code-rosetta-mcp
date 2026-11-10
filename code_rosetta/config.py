@@ -9,8 +9,10 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-_CONFIG_DIR = Path.home() / ".code-rosetta"
-_CONFIG_FILE = _CONFIG_DIR / "config.yaml"
+_CONFIG_FILE = Path(
+    os.environ.get("CODE_ROSETTA_CONFIG") or Path.home() / ".code-rosetta" / "config.yaml"
+).expanduser()
+_CONFIG_DIR = _CONFIG_FILE.parent
 
 
 def _load_yaml(path: Path) -> dict:

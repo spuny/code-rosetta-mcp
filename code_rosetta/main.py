@@ -79,8 +79,12 @@ def get_impact_radius_tool(
     Shows impacted functions, classes, resources, and templates.
     Includes cross-language impact (e.g., Python change affecting YAML config).
 
+    changed_files must be under a configured repo root (max 50); anything outside is rejected.
+
     Args:
-        changed_files: Changed file paths. Auto-detected from git if omitted.
+        changed_files: Changed file paths, at most 50. Relative to the repo root, or absolute; every
+            path must resolve to a file under a configured repo root (a path outside, a ".." escape
+            or a symlink pointing out is rejected with an error). Auto-detected from git if omitted.
         max_depth: Hops to traverse. Default: 2.
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for change detection. Default: HEAD~1.
@@ -139,13 +143,17 @@ def search_nodes_tool(
     """Search for code entities by name across all languages.
 
     Supports filtering by node kind (Function, Class, Resource, Variable, etc.)
-    and by language (python, hcl, yaml, jinja2).
+    and by language (python, hcl, yaml, jinja2). Exact name matches come first.
+
+    Each result has repo (GitLab project path), path (relative to the repo), ref, web_url
+    and file_path (absolute path on the server).
 
     Args:
         query: Search string.
         kind: Filter by node kind.
         language: Filter by language.
-        limit: Max results. Default: 20.
+        limit: Max results. Default: 20. Server cap: 500; a larger limit is clamped and the result says
+            so in limit_clamped ({requested, applied}).
         repo_root: Repository root path. Auto-detected if omitted.
         group: Named config group. Searches across all repos in the group.
     """
@@ -187,10 +195,15 @@ def get_review_context_tool(
 
     Combines cross-language impact analysis with source snippets.
 
+    changed_files must be under a configured repo root (max 50); anything outside is rejected.
+    A file over 2 MB gets no snippet.
+
     Args:
-        changed_files: Files to review. Auto-detected if omitted.
+        changed_files: Files to review, at most 50. Relative to the repo root, or absolute; every path
+            must resolve to a file under a configured repo root (a path outside, a ".." escape or a
+            symlink pointing out is rejected with an error). Auto-detected if omitted.
         max_depth: Impact radius depth. Default: 2.
-        include_source: Include source snippets. Default: True.
+        include_source: Include source snippets. Default: True. A file over 2 MB is not read.
         max_lines_per_file: Max source lines per file. Default: 200.
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for change detection. Default: HEAD~1.
@@ -221,13 +234,23 @@ def grep_code_tool(
     "is X anywhere in code". Use search_nodes_tool / query_graph_tool for
     structure (who calls, what references).
 
+    Result: "truncated" is true when results were cut, by limit or by the ~5 MB response
+    budget, so a short list with truncated=true is not the whole answer: narrow the query
+    (path_glob). Each match has repo (GitLab project path), path (relative to the repo),
+    line, text, ref (commit of the indexed checkout), web_url (GitLab link with #L<line>)
+    and abs_path (path on the server). repo/ref/web_url are null outside the synced group.
+
     Args:
         pattern: Literal text, or a Python regex when regex=True.
         regex: Treat pattern as a regex.
         ignore_case: Case-insensitive match.
-        path_glob: fnmatch filter on the absolute path, e.g. "*/infra*/cluster/*".
-        limit: Max matching lines (or files with files_only). Default: 100.
-        files_only: Return matching file paths only.
+        path_glob: fnmatch filter. Matches the absolute path (abs_path), e.g. "*/infra*/cluster/*",
+            and also the form a hit reports as repo + path: pass "<repo>/<path>" from a hit
+            (e.g. "acme/apis/clients/x.tf") to narrow to that file.
+        limit: Max matching lines (or files with files_only). Default: 100. Server caps: 5,000 lines,
+            20,000 files. A larger limit is clamped and the result says so in limit_clamped
+            ({requested, applied}).
+        files_only: Return matching file paths only (also listed with repo/path/ref/web_url in file_hits).
         repo_root: Repository root path. Auto-detected if omitted.
         group: Named config group. Searches across all repos in the group.
     """

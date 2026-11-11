@@ -148,6 +148,28 @@ def test_sync_heals_clone_that_was_never_indexed(env, monkeypatch):
     assert r["reindexed"] == 0
 
 
+def test_summary_reports_index_health(env, monkeypatch):
+    tmp = env
+    a_bare, _ = _origin(tmp, "a", {"deploy.yaml": "image: ghcr.io/x/web:v1\n"})
+    b_bare, _ = _origin(tmp, "b", {"main.tf": 'resource "aws_s3_bucket" "logs" {}\n'})
+    projects = [_project(1, "devops/a", a_bare), _project(2, "devops/b", b_bare)]
+    r = _sync(tmp, monkeypatch, projects)
+    assert (r["indexed_repos"], r["expected_repos"], r["ok"]) == (2, 2, True)
+
+
+def test_ok_is_false_when_a_clone_stays_unindexed(env, monkeypatch, caplog):
+    from code_rosetta import incremental
+
+    tmp = env
+    a_bare, _ = _origin(tmp, "a", {"deploy.yaml": "image: ghcr.io/x/web:v1\n"})
+    monkeypatch.setattr(incremental, "full_build", lambda *a, **k: {})  # indexing silently does nothing
+    with caplog.at_level("WARNING"):
+        r = _sync(tmp, monkeypatch, [_project(1, "devops/a", a_bare)])
+    assert (r["indexed_repos"], r["expected_repos"]) == (0, 1)
+    assert r["ok"] is False
+    assert any("not indexed" in m and "devops/a" in m for m in caplog.messages)
+
+
 def test_repo_with_nothing_indexable_is_not_rebuilt_every_run(env, monkeypatch):
     tmp = env
     bare, work = _origin(tmp, "blob", {"x.txt": "placeholder\n"})

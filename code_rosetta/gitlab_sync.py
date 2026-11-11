@@ -224,6 +224,14 @@ def sync(
             store.commit()
         stats = store.get_stats()
 
+        # Index health: every clone that has something indexable must have at least one indexed file.
+        failed_paths = {r["path"] for r in results if r["action"] == "failed"}
+        final_counts = indexed_file_counts(store, in_scope)
+        expected = {p for p in in_scope if p not in failed_paths and has_indexable_files(p)}
+        missing = sorted(p for p in expected if final_counts[p] == 0)
+        for p in missing:
+            logger.warning("%s: not indexed (cloned, has indexable files, index has none)", p.relative_to(repos_dir))
+
     write_config(_CONFIG_FILE, group_name, db_path, sorted(in_scope))
 
     return {
@@ -232,7 +240,9 @@ def sync(
         "removed": removed,
         "reindexed": reindexed,
         "failed": counts.get("failed", 0),
-        "ok": len(in_scope) > 0,
+        "indexed_repos": len(expected) - len(missing),
+        "expected_repos": len(expected),
+        "ok": len(in_scope) > 0 and not missing,
         "nodes": stats.total_nodes,
         "files": stats.files_count,
         "git_seconds": round(t_git, 1),

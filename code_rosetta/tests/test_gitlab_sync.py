@@ -111,6 +111,58 @@ def test_clone_update_and_purge(env, monkeypatch):
         assert not [f for f in store.get_all_files() if "/devops/b/" in f]
 
 
+def _drop_index_rows(tmp_path, repo_rel):
+    """Remove a repo's graph and content rows but leave its clone on disk (what a killed sync leaves)."""
+    prefix = str((tmp_path / "data" / "repos" / repo_rel).resolve()) + "/"
+    with GraphStore(tmp_path / "data" / "q.db") as store:
+        for f in store.get_all_files():
+            if f.startswith(prefix):
+                store.remove_file_data(f)
+        conn = store._conn
+        for path, rowid in conn.execute("SELECT path, fts_rowid FROM file_content_meta").fetchall():
+            if path.startswith(prefix):
+                conn.execute("DELETE FROM file_content WHERE rowid = ?", (rowid,))
+                conn.execute("DELETE FROM file_content_meta WHERE path = ?", (path,))
+        store.commit()
+
+
+def test_sync_heals_clone_that_was_never_indexed(env, monkeypatch):
+    """A sync killed after clone but before indexing leaves a clone later runs call 'unchanged'."""
+    tmp = env
+    a_bare, _ = _origin(tmp, "a", {"deploy.yaml": "image: ghcr.io/x/web:v1\n"})
+    b_bare, _ = _origin(tmp, "b", {"main.tf": 'resource "aws_s3_bucket" "logs" {}\n'})
+    projects = [_project(1, "devops/a", a_bare), _project(2, "devops/b", b_bare)]
+    _sync(tmp, monkeypatch, projects)
+
+    # Simulate the kill: b stays cloned on disk but its index rows are gone.
+    _drop_index_rows(tmp, "devops/b")
+    assert _grep(tmp, "aws_s3_bucket").get("matches", []) == []
+
+    r = _sync(tmp, monkeypatch, projects)
+    assert r["unchanged"] == 2
+    assert r["reindexed"] == 1
+    assert _paths(_grep(tmp, "aws_s3_bucket")) == ["devops/b/main.tf"]
+    assert _paths(_grep(tmp, "ghcr.io/x/web")) == ["devops/a/deploy.yaml"]
+
+    r = _sync(tmp, monkeypatch, projects)
+    assert r["reindexed"] == 0
+
+
+def test_repo_with_nothing_indexable_is_not_rebuilt_every_run(env, monkeypatch):
+    tmp = env
+    bare, work = _origin(tmp, "blob", {"x.txt": "placeholder\n"})
+    (work / "x.txt").unlink()
+    (work / "data.bin").write_bytes(b"\x00\x01\x02binary")
+    _run(["git", "add", "-A"], work)
+    _run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "bin"], work)
+    _run(["git", "push", "-q", "origin", "main"], work)
+    a_bare, _ = _origin(tmp, "a", {"deploy.yaml": "image: ghcr.io/x/web:v1\n"})
+    projects = [_project(1, "devops/a", a_bare), _project(2, "devops/blob", bare)]
+    _sync(tmp, monkeypatch, projects)
+    r = _sync(tmp, monkeypatch, projects)
+    assert r["reindexed"] == 0
+
+
 def test_failed_fetch_keeps_existing_repo(env, monkeypatch):
     tmp = env
     a_bare, _ = _origin(tmp, "a", {"x.yaml": "key: keepme\n"})

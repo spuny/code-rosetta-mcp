@@ -126,6 +126,41 @@ def purge_repo(store, repo_root: Path) -> None:
     store.commit()
 
 
+def has_indexable_files(repo: Path) -> bool:
+    """True when the clone holds something the graph or content index would take."""
+    from .content import _candidate_files
+    from .incremental import collect_all_files
+
+    return bool(collect_all_files(repo) or _candidate_files(repo))
+
+
+def indexed_file_counts(store, repos: set[Path]) -> dict[Path, int]:
+    """Indexed files per repo root: graph File nodes plus content rows, whichever is larger."""
+    from .content import ensure_schema
+
+    roots = {str(r): r for r in repos}
+    graph: dict[Path, int] = {r: 0 for r in repos}
+    content: dict[Path, int] = {r: 0 for r in repos}
+
+    def owner(path: str) -> Path | None:
+        p = Path(path)
+        for parent in p.parents:
+            if str(parent) in roots:
+                return roots[str(parent)]
+        return None
+
+    for f in store.get_all_files():
+        r = owner(f)
+        if r is not None:
+            graph[r] += 1
+    if ensure_schema(store._conn):
+        for (path,) in store._conn.execute("SELECT path FROM file_content_meta"):
+            r = owner(path)
+            if r is not None:
+                content[r] += 1
+    return {r: max(graph[r], content[r]) for r in repos}
+
+
 def sync(
     url: str, token: str, groups: list[str], repos_dir: Path, db_path: Path,
     group_name: str = "default", workers: int = 8, limit: int = 0,
@@ -163,6 +198,17 @@ def sync(
             elif r["action"] == "updated":
                 incremental_update(r["path"], store, changed_files=r["changed"])
 
+        # A sync killed after the clone but before indexing leaves clones that every later run calls
+        # "unchanged" and never indexes. Any in-scope clone with nothing indexed gets a full build.
+        counts_now = indexed_file_counts(store, in_scope)
+        built = {r["path"] for r in results if r["action"] in ("cloned", "updated")}
+        reindexed = 0
+        for repo in sorted(p for p, n in counts_now.items()
+                           if n == 0 and p not in built and has_indexable_files(p)):
+            logger.warning("%s: cloned but nothing indexed, indexing now", repo)
+            full_build(repo, store)
+            reindexed += 1
+
         # Repos that were archived, deleted or moved out of scope.
         if not limit:
             for root in Config(_CONFIG_FILE).get_group_repos(group_name):
@@ -171,7 +217,7 @@ def sync(
                     purge_repo(store, root)
                     removed += 1
 
-        if counts.get("cloned") or counts.get("updated") or removed:
+        if counts.get("cloned") or counts.get("updated") or removed or reindexed:
             store.resolve_cross_file_calls()
             if store._has_fts():
                 store.rebuild_fts()
@@ -184,6 +230,7 @@ def sync(
         "projects": len(projects),
         **counts,
         "removed": removed,
+        "reindexed": reindexed,
         "failed": counts.get("failed", 0),
         "ok": len(in_scope) > 0,
         "nodes": stats.total_nodes,

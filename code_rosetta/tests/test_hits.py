@@ -128,3 +128,17 @@ def test_path_outside_all_repos_is_left_alone(tmp_path):
     r = hits.HitResolver([tmp_path / "x"], repos_dir=tmp_path, gitlab_url=BASE)
     h = r.hit("/elsewhere/file.py", 3)
     assert h["repo"] is None and h["web_url"] is None and h["abs_path"] == "/elsewhere/file.py"
+
+
+def test_ref_lookup_survives_the_cache_being_cleared_by_another_thread(monkeypatch, tmp_path):
+    """Tools run in a threadpool; a config change clears the shared cache from another thread. Between
+    this call's write and a read-back the entry may be gone, so the value must come from a local."""
+
+    class Cleared(dict):
+        def __getitem__(self, key):
+            raise KeyError(key)  # what a concurrent .clear() makes a read-back do
+
+    monkeypatch.setattr(hits, "_REF_CACHE", Cleared())
+    monkeypatch.setattr(hits, "_REF_STAMP", 1.0)
+    monkeypatch.setattr(hits, "_git_head", lambda root: "abc123")
+    assert hits._ref_for(tmp_path, 1.0) == "abc123"

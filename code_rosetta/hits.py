@@ -27,14 +27,21 @@ def _git_head(root: Path) -> str | None:
     return r.stdout.strip() or None if r.returncode == 0 else None
 
 
+_UNSET = object()
+
+
 def _ref_for(root: Path, stamp: float | None) -> str | None:
+    """Tools run in a threadpool and another thread may clear the cache on a config change, so work with
+    a local value and never read the shared dict back after writing it."""
     global _REF_STAMP
     if stamp != _REF_STAMP:
         _REF_CACHE.clear()
         _REF_STAMP = stamp
-    if root not in _REF_CACHE:
-        _REF_CACHE[root] = _git_head(root)
-    return _REF_CACHE[root]
+    ref = _REF_CACHE.get(root, _UNSET)
+    if ref is _UNSET:
+        ref = _git_head(root)
+        _REF_CACHE[root] = ref
+    return ref  # type: ignore[return-value]
 
 
 class HitResolver:

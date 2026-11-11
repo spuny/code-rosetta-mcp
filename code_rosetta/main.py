@@ -347,14 +347,26 @@ plus a cross-language graph (who calls what, what references what). It speaks MC
 """
 
 
+def _public_scheme(forwarded_proto: str | None, host: str, own_scheme: str) -> str:
+    """The scheme a client should type. A TLS-terminating proxy hides https from us, and a copy-pasted http://
+    line to a public name returns 404 (QA r2, finding 2), so https is the default; only a local address is
+    plain http."""
+    if forwarded_proto:
+        return forwarded_proto.split(",")[0].strip().lower()
+    hostname = host.rsplit(":", 1)[0].strip("[]") if not host.endswith("]") else host.strip("[]")
+    if hostname in ("localhost", "127.0.0.1", "::1"):
+        return own_scheme
+    return "https"
+
+
 @mcp.custom_route("/", methods=["GET"])
 async def landing(request):
     import html
 
     from starlette.responses import HTMLResponse
 
-    scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
     host = request.headers.get("host") or request.url.netloc
+    scheme = _public_scheme(request.headers.get("x-forwarded-proto"), host, request.url.scheme)
     endpoint = html.escape(f"{scheme}://{host}/mcp", quote=True)
     try:
         tools = sorted(await mcp.list_tools(), key=lambda t: t.name)

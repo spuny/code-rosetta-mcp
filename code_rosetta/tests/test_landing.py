@@ -15,8 +15,8 @@ def test_root_explains_what_this_is_and_how_to_connect():
     assert r.headers["content-type"].startswith("text/html")
     html = r.text
     assert "Code Rosetta" in html
-    assert "http://testserver/mcp" in html
-    assert "claude mcp add --transport http rosetta http://testserver/mcp" in html
+    assert "https://testserver/mcp" in html
+    assert "claude mcp add --transport http rosetta https://testserver/mcp" in html
     for tool in ("grep_code_tool", "search_nodes_tool", "query_graph_tool"):
         assert tool in html
     assert "no web search UI" in html and "Sourcebot" in html
@@ -47,3 +47,20 @@ def test_healthz_and_mcp_route_still_work():
 def test_page_says_group_is_optional():
     html = _get().text
     assert "ROSETTA_DEFAULT_GROUP" in html and "optional" in html
+
+
+def test_a_public_name_without_forwarded_proto_still_gets_https():
+    """Behind an ingress that does not send X-Forwarded-Proto the page used to print http:// (404 on copy-paste)."""
+    html = _get(host="rosetta.example.com").text
+    assert "claude mcp add --transport http rosetta https://rosetta.example.com/mcp" in html
+    assert "http://rosetta.example.com" not in html
+
+
+def test_localhost_stays_plain_http():
+    for host in ("localhost:8000", "127.0.0.1:8000", "[::1]:8000"):
+        assert f"http://{host}/mcp" in _get(host=host).text, host
+
+
+def test_forwarded_proto_is_honoured():
+    html = _get(**{"x-forwarded-proto": "http", "host": "rosetta.example.com"}).text
+    assert "http://rosetta.example.com/mcp" in html

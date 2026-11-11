@@ -28,6 +28,15 @@ SEARCH_MAX_RESULTS = 500
 GREP_MAX_RESPONSE_BYTES = 5_000_000
 
 
+def _bad_args(what: str, text: str, limit: int) -> dict[str, Any] | None:
+    """Reject arguments that used to be silently answered with arbitrary or truncated results."""
+    if not text.strip():
+        return {"status": "error", "error": f"{what} must not be empty"}
+    if limit < 1:
+        return {"status": "error", "error": f"limit must be >= 1 (got {limit})"}
+    return None
+
+
 def _clamp(limit: int, cap: int) -> tuple[int, dict[str, int] | None]:
     if limit > cap:
         return cap, {"requested": limit, "applied": cap}
@@ -379,6 +388,8 @@ def search_nodes(
     group: str | None = None,
 ) -> dict[str, Any]:
     """Search for nodes by name, optionally filtered by kind and language."""
+    if (bad := _bad_args("query", query, limit)):
+        return bad
     limit, clamped = _clamp(limit, SEARCH_MAX_RESULTS)
     store, root, _ = _resolve_store(group=group, repo_root=repo_root)
     try:
@@ -419,6 +430,8 @@ def grep_content(
     """Full-text or regex search over every indexed text file."""
     from .content import grep
 
+    if (bad := _bad_args("pattern", pattern, limit)):
+        return bad
     limit, clamped = _clamp(limit, GREP_MAX_FILES if files_only else GREP_MAX_MATCHES)
     store, _, _ = _resolve_store(group=group, repo_root=repo_root)
     try:

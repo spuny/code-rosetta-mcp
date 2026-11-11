@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Optional
+import json
+from typing import Any, Optional
 
 from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
 
 from .tools import (
     build_or_update_graph,
@@ -17,6 +19,13 @@ from .tools import (
 )
 
 _default_repo_root: str | None = None
+
+
+def _flag_errors(result: dict[str, Any]) -> Any:
+    """A result with status "error" must reach the client as isError, so agents don't read it as empty."""
+    if isinstance(result, dict) and result.get("status") == "error":
+        return ToolResult(content=json.dumps(result), structured_content=result, is_error=True)
+    return result
 
 mcp = FastMCP(
     "code-rosetta",
@@ -49,12 +58,12 @@ def build_or_update_graph_tool(
         group: Named config group (e.g. 'mygroup'). Builds all repos in the group.
                Takes precedence over repo_root.
     """
-    return build_or_update_graph(
+    return _flag_errors(build_or_update_graph(
         full_rebuild=full_rebuild,
         repo_root=repo_root or _default_repo_root,
         base=base,
         group=group,
-    )
+    ))
 
 
 @mcp.tool()
@@ -77,11 +86,11 @@ def get_impact_radius_tool(
         base: Git ref for change detection. Default: HEAD~1.
         group: Named config group. Opens the group's shared DB for cross-repo analysis.
     """
-    return get_impact_radius(
+    return _flag_errors(get_impact_radius(
         changed_files=changed_files, max_depth=max_depth,
         repo_root=repo_root or _default_repo_root, base=base,
         group=group,
-    )
+    ))
 
 
 @mcp.tool()
@@ -111,11 +120,11 @@ def query_graph_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         group: Named config group. Opens the group's shared DB for cross-repo queries.
     """
-    return query_graph(
+    return _flag_errors(query_graph(
         pattern=pattern, target=target,
         repo_root=repo_root or _default_repo_root,
         group=group,
-    )
+    ))
 
 
 @mcp.tool()
@@ -140,11 +149,11 @@ def search_nodes_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         group: Named config group. Searches across all repos in the group.
     """
-    return search_nodes(
+    return _flag_errors(search_nodes(
         query=query, kind=kind, language=language,
         limit=limit, repo_root=repo_root or _default_repo_root,
         group=group,
-    )
+    ))
 
 
 @mcp.tool()
@@ -161,7 +170,7 @@ def list_graph_stats_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         group: Named config group. Shows stats for the group's shared graph.
     """
-    return list_graph_stats(repo_root=repo_root or _default_repo_root, group=group)
+    return _flag_errors(list_graph_stats(repo_root=repo_root or _default_repo_root, group=group))
 
 
 @mcp.tool()
@@ -187,12 +196,12 @@ def get_review_context_tool(
         base: Git ref for change detection. Default: HEAD~1.
         group: Named config group. Uses the group's shared graph for cross-repo context.
     """
-    return get_review_context(
+    return _flag_errors(get_review_context(
         changed_files=changed_files, max_depth=max_depth,
         include_source=include_source, max_lines_per_file=max_lines_per_file,
         repo_root=repo_root or _default_repo_root, base=base,
         group=group,
-    )
+    ))
 
 
 @mcp.tool()
@@ -222,11 +231,11 @@ def grep_code_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         group: Named config group. Searches across all repos in the group.
     """
-    return grep_content(
+    return _flag_errors(grep_content(
         pattern=pattern, regex=regex, ignore_case=ignore_case,
         path_glob=path_glob, limit=limit, files_only=files_only,
         repo_root=repo_root or _default_repo_root, group=group,
-    )
+    ))
 
 
 @mcp.custom_route("/healthz", methods=["GET"])

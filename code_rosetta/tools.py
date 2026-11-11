@@ -8,7 +8,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import os
+
+from . import config as _config
 from .config import cfg
+from .hits import HitResolver
 from .graph import GraphStore, edge_to_dict, node_to_dict
 from .incremental import (
     find_project_root,
@@ -26,6 +30,22 @@ GREP_MAX_MATCHES = 5_000
 GREP_MAX_FILES = 20_000
 SEARCH_MAX_RESULTS = 500
 GREP_MAX_RESPONSE_BYTES = 5_000_000
+
+
+def _hit_resolver(group: str | None, root: Path | None, repos: list[Path] | None) -> HitResolver:
+    """Resolver over the configured repo roots (group) or the single repo root."""
+    meta = (cfg.get_group(group) or {}) if group else {}
+    repos_dir = meta.get("repos_dir")
+    try:
+        stamp = _config._CONFIG_FILE.stat().st_mtime
+    except OSError:
+        stamp = None
+    return HitResolver(
+        roots=repos if repos is not None else ([root] if root else []),
+        repos_dir=Path(repos_dir) if repos_dir else None,
+        gitlab_url=meta.get("gitlab_url") or os.environ.get("GITLAB_URL"),
+        stamp=stamp,
+    )
 
 
 def _bad_args(what: str, text: str, limit: int) -> dict[str, Any] | None:
@@ -391,7 +411,7 @@ def search_nodes(
     if (bad := _bad_args("query", query, limit)):
         return bad
     limit, clamped = _clamp(limit, SEARCH_MAX_RESULTS)
-    store, root, _ = _resolve_store(group=group, repo_root=repo_root)
+    store, root, repos = _resolve_store(group=group, repo_root=repo_root)
     try:
         results = store.search_nodes(query, limit=limit * 2)
         if kind:
@@ -408,6 +428,10 @@ def search_nodes(
             + (f" (language={language})" if language else ""),
             "results": [node_to_dict(r) for r in results],
         }
+        resolver = _hit_resolver(group, root, repos)
+        for d in out["results"]:
+            h = resolver.hit(d["file_path"], d.get("line_start"))
+            d.update(repo=h["repo"], path=h["path"], ref=h["ref"], web_url=h["web_url"])
         if clamped:
             out["limit_clamped"] = clamped
         return out
@@ -433,12 +457,21 @@ def grep_content(
     if (bad := _bad_args("pattern", pattern, limit)):
         return bad
     limit, clamped = _clamp(limit, GREP_MAX_FILES if files_only else GREP_MAX_MATCHES)
-    store, _, _ = _resolve_store(group=group, repo_root=repo_root)
+    store, root, repos = _resolve_store(group=group, repo_root=repo_root)
     try:
         res = grep(store, pattern, regex=regex, ignore_case=ignore_case, path_glob=path_glob,
                    limit=limit, files_only=files_only, max_bytes=GREP_MAX_RESPONSE_BYTES)
-        if clamped and res.get("status") == "ok":
-            res["limit_clamped"] = clamped  # truncated stays whatever grep found: true only if cut
+        if res.get("status") == "ok":
+            resolver = _hit_resolver(group, root, repos)
+            for m in res.get("matches", []):
+                m.update(resolver.hit(m["path"], m["line"]))  # path becomes repo-relative, abs_path kept
+            if files_only:
+                res["file_hits"] = [
+                    {k: h[k] for k in ("repo", "path", "ref", "web_url")}
+                    for h in (resolver.hit(f) for f in res["files"])
+                ]
+            if clamped:
+                res["limit_clamped"] = clamped  # truncated stays whatever grep found: true only if cut
         return res
     finally:
         store.close()

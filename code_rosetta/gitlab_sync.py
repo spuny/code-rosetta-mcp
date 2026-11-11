@@ -102,15 +102,22 @@ def mirror_project(project: dict, repos_dir: Path, env: dict) -> dict:
     return out
 
 
-def write_config(config_path: Path, group_name: str, db_path: Path, repos: list[Path]) -> None:
+def write_config(config_path: Path, group_name: str, db_path: Path, repos: list[Path],
+                 repos_dir: Path | None = None, gitlab_url: str | None = None) -> None:
     from ruamel.yaml import YAML
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = config_path.with_suffix(".tmp")
     yaml = YAML()
     yaml.default_flow_style = False
+    group: dict = {"db": str(db_path), "repos": [str(r) for r in repos]}
+    # Lets the server turn a hit into <project, path, GitLab link> without any extra environment.
+    if repos_dir is not None:
+        group["repos_dir"] = str(repos_dir)
+    if gitlab_url:
+        group["gitlab_url"] = gitlab_url.rstrip("/")
     with open(tmp, "w") as f:
-        yaml.dump({"graphs": {group_name: {"db": str(db_path), "repos": [str(r) for r in repos]}}}, f)
+        yaml.dump({"graphs": {group_name: group}}, f)
     tmp.replace(config_path)
 
 
@@ -232,7 +239,7 @@ def sync(
         for p in missing:
             logger.warning("%s: not indexed (cloned, has indexable files, index has none)", p.relative_to(repos_dir))
 
-    write_config(_CONFIG_FILE, group_name, db_path, sorted(in_scope))
+    write_config(_CONFIG_FILE, group_name, db_path, sorted(in_scope), repos_dir=repos_dir, gitlab_url=url)
 
     return {
         "projects": len(projects),

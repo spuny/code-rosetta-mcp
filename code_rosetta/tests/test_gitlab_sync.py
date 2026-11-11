@@ -148,6 +148,86 @@ def test_sync_heals_clone_that_was_never_indexed(env, monkeypatch):
     assert r["reindexed"] == 0
 
 
+def _drop_content_rows(tmp_path, repo_rel):
+    """Keep a repo's graph rows but drop its content rows (a build killed before sync_content committed)."""
+    prefix = str((tmp_path / "data" / "repos" / repo_rel).resolve()) + "/"
+    with GraphStore(tmp_path / "data" / "q.db") as store:
+        conn = store._conn
+        for path, rowid in conn.execute("SELECT path, fts_rowid FROM file_content_meta").fetchall():
+            if path.startswith(prefix):
+                conn.execute("DELETE FROM file_content WHERE rowid = ?", (rowid,))
+                conn.execute("DELETE FROM file_content_meta WHERE path = ?", (path,))
+        store.commit()
+
+
+def _graph_files(tmp_path, repo_rel):
+    prefix = str((tmp_path / "data" / "repos" / repo_rel).resolve()) + "/"
+    with GraphStore(tmp_path / "data" / "q.db") as store:
+        return sorted(f[len(prefix):] for f in store.get_all_files() if f.startswith(prefix))
+
+
+def test_sync_heals_graph_only_repo_killed_before_content_commit(env, monkeypatch):
+    """Graph rows are committed per file, content only at the end: a kill leaves graph>0, content=0."""
+    tmp = env
+    a_bare, _ = _origin(tmp, "a", {"deploy.yaml": "image: ghcr.io/x/web:v1\n"})
+    b_bare, _ = _origin(tmp, "b", {"main.tf": 'resource "aws_s3_bucket" "logs" {}\n'})
+    projects = [_project(1, "devops/a", a_bare), _project(2, "devops/b", b_bare)]
+    _sync(tmp, monkeypatch, projects)
+    _drop_content_rows(tmp, "devops/b")
+    assert _graph_files(tmp, "devops/b") == ["main.tf"]
+    assert _grep(tmp, "aws_s3_bucket").get("matches", []) == []
+
+    r = _sync(tmp, monkeypatch, projects)
+    assert r["reindexed"] == 1
+    assert _paths(_grep(tmp, "aws_s3_bucket")) == ["devops/b/main.tf"]
+    assert r["ok"] is True
+
+
+def test_health_is_false_while_content_is_missing(env, monkeypatch):
+    from code_rosetta import incremental
+
+    tmp = env
+    b_bare, _ = _origin(tmp, "b", {"main.tf": 'resource "aws_s3_bucket" "logs" {}\n'})
+    projects = [_project(2, "devops/b", b_bare)]
+    _sync(tmp, monkeypatch, projects)
+    _drop_content_rows(tmp, "devops/b")
+    monkeypatch.setattr(incremental, "full_build", lambda *a, **k: {})  # healing does nothing
+    r = _sync(tmp, monkeypatch, projects)
+    assert (r["indexed_repos"], r["expected_repos"], r["ok"]) == (0, 1, False)
+
+
+def test_sync_heals_unindexed_clone_that_then_gets_a_commit(env, monkeypatch):
+    """incremental_update builds the graph only for changed files, so an unindexed repo that receives a
+    commit would stay half-indexed (content complete, graph only for the changed file)."""
+    tmp = env
+    b_bare, b_work = _origin(tmp, "b", {"main.tf": 'resource "aws_s3_bucket" "logs" {}\n',
+                                       "other.tf": 'resource "aws_sqs_queue" "q" {}\n'})
+    projects = [_project(2, "devops/b", b_bare)]
+    _sync(tmp, monkeypatch, projects)
+    _drop_index_rows(tmp, "devops/b")
+
+    _commit(b_work, {"other.tf": 'resource "aws_sqs_queue" "q2" {}\n'})
+    r = _sync(tmp, monkeypatch, projects)
+    assert r["updated"] == 1
+    assert _graph_files(tmp, "devops/b") == ["main.tf", "other.tf"]
+    assert r["reindexed"] == 1
+    assert r["ok"] is True
+
+
+def test_has_indexable_check_only_runs_for_repos_with_a_zero_count(env, monkeypatch):
+    tmp = env
+    a_bare, _ = _origin(tmp, "a", {"deploy.yaml": "image: ghcr.io/x/web:v1\n"})
+    projects = [_project(1, "devops/a", a_bare)]
+    _sync(tmp, monkeypatch, projects)
+    calls = []
+    real_collect = gitlab_sync._parseable_files
+    monkeypatch.setattr(gitlab_sync, "_parseable_files", lambda p: calls.append(p) or real_collect(p))
+    monkeypatch.setattr(gitlab_sync, "_content_candidates", lambda p: calls.append(p) or [])
+    r = _sync(tmp, monkeypatch, projects)
+    assert r["unchanged"] == 1 and r["ok"] is True
+    assert calls == []
+
+
 def test_summary_reports_index_health(env, monkeypatch):
     tmp = env
     a_bare, _ = _origin(tmp, "a", {"deploy.yaml": "image: ghcr.io/x/web:v1\n"})

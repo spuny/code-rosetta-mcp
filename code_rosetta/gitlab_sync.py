@@ -133,25 +133,33 @@ def purge_repo(store, repo_root: Path) -> None:
     store.commit()
 
 
-def has_indexable_files(repo: Path) -> bool:
-    """True when the clone holds something the graph or content index would take."""
-    from .content import _candidate_files
+def _parseable_files(repo: Path) -> list[str]:
+    """Files the graph index would take."""
     from .incremental import collect_all_files
 
-    return bool(collect_all_files(repo) or _candidate_files(repo))
+    return collect_all_files(repo)
 
 
-def indexed_file_counts(store, repos: set[Path]) -> dict[Path, int]:
-    """Indexed files per repo root: graph File nodes plus content rows, whichever is larger."""
+def _content_candidates(repo: Path) -> list[str]:
+    """Files the content (grep) index would take."""
+    from .content import _candidate_files
+
+    return _candidate_files(repo)
+
+
+def index_counts(store, repos: set[Path]) -> tuple[dict[Path, int], dict[Path, int] | None]:
+    """Indexed files per repo root, graph File nodes and content rows kept apart.
+
+    Graph rows are committed per file, content rows only when a repo's content sync ends, so a killed build
+    leaves one without the other. The content side is None when the content index is unavailable.
+    """
     from .content import ensure_schema
 
     roots = {str(r): r for r in repos}
     graph: dict[Path, int] = {r: 0 for r in repos}
-    content: dict[Path, int] = {r: 0 for r in repos}
 
     def owner(path: str) -> Path | None:
-        p = Path(path)
-        for parent in p.parents:
+        for parent in Path(path).parents:
             if str(parent) in roots:
                 return roots[str(parent)]
         return None
@@ -160,12 +168,43 @@ def indexed_file_counts(store, repos: set[Path]) -> dict[Path, int]:
         r = owner(f)
         if r is not None:
             graph[r] += 1
-    if ensure_schema(store._conn):
-        for (path,) in store._conn.execute("SELECT path FROM file_content_meta"):
-            r = owner(path)
-            if r is not None:
-                content[r] += 1
-    return {r: max(graph[r], content[r]) for r in repos}
+    if not ensure_schema(store._conn):
+        return graph, None
+    content: dict[Path, int] = {r: 0 for r in repos}
+    for (path,) in store._conn.execute("SELECT path FROM file_content_meta"):
+        r = owner(path)
+        if r is not None:
+            content[r] += 1
+    return graph, content
+
+
+class _IndexGaps:
+    """Which indexes a repo is missing. The file scans only run for a zero count, once per repo per sync."""
+
+    def __init__(self) -> None:
+        self._parseable: dict[Path, bool] = {}
+        self._candidates: dict[Path, bool] = {}
+
+    def parseable(self, repo: Path) -> bool:
+        if repo not in self._parseable:
+            self._parseable[repo] = bool(_parseable_files(repo))
+        return self._parseable[repo]
+
+    def candidates(self, repo: Path) -> bool:
+        if repo not in self._candidates:
+            self._candidates[repo] = bool(_content_candidates(repo))
+        return self._candidates[repo]
+
+    def missing_graph(self, repo: Path, graph: dict[Path, int]) -> bool:
+        return graph[repo] == 0 and self.parseable(repo)
+
+    def missing_content(self, repo: Path, content: dict[Path, int] | None) -> bool:
+        return content is not None and content[repo] == 0 and self.candidates(repo)
+
+    def indexable(self, repo: Path, graph: dict[Path, int], content: dict[Path, int] | None) -> bool:
+        if graph[repo] or (content is not None and content[repo]):
+            return True
+        return self.parseable(repo) or (content is not None and self.candidates(repo))
 
 
 def sync(
@@ -198,23 +237,26 @@ def sync(
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
     removed = 0
+    gaps = _IndexGaps()
     with GraphStore(db_path) as store:
-        for r in results:
-            if r["action"] == "cloned":
-                full_build(r["path"], store)
-            elif r["action"] == "updated":
-                incremental_update(r["path"], store, changed_files=r["changed"])
-
-        # A sync killed after the clone but before indexing leaves clones that every later run calls
-        # "unchanged" and never indexes. Any in-scope clone with nothing indexed gets a full build.
-        counts_now = indexed_file_counts(store, in_scope)
-        built = {r["path"] for r in results if r["action"] in ("cloned", "updated")}
+        # Look at the index BEFORE building. A clone left without graph or content rows (a sync killed
+        # after the clone, or between the graph and the content commit) must get a full build whatever
+        # git says: incremental_update only builds the graph for changed files, so an update on top of
+        # an empty index would leave it half-indexed.
+        graph_before, content_before = index_counts(store, in_scope)
         reindexed = 0
-        for repo in sorted(p for p, n in counts_now.items()
-                           if n == 0 and p not in built and has_indexable_files(p)):
-            logger.warning("%s: cloned but nothing indexed, indexing now", repo)
-            full_build(repo, store)
-            reindexed += 1
+        for r in results:
+            path = r["path"]
+            if r["action"] == "cloned":
+                full_build(path, store)
+            elif path in in_scope and (gaps.missing_graph(path, graph_before)
+                                       or gaps.missing_content(path, content_before)):
+                logger.warning("%s: index incomplete (graph %d, content %s), indexing now", path,
+                               graph_before[path], content_before[path] if content_before else "n/a")
+                full_build(path, store)
+                reindexed += 1
+            elif r["action"] == "updated":
+                incremental_update(path, store, changed_files=r["changed"])
 
         # Repos that were archived, deleted or moved out of scope.
         if not limit:
@@ -231,13 +273,15 @@ def sync(
             store.commit()
         stats = store.get_stats()
 
-        # Index health: every clone that has something indexable must have at least one indexed file.
+        # Index health: every clone with something indexable must have its graph rows (if it has parseable
+        # files) and its content rows (if it has searchable files).
         failed_paths = {r["path"] for r in results if r["action"] == "failed"}
-        final_counts = indexed_file_counts(store, in_scope)
-        expected = {p for p in in_scope if p not in failed_paths and has_indexable_files(p)}
-        missing = sorted(p for p in expected if final_counts[p] == 0)
+        graph_now, content_now = index_counts(store, in_scope)
+        expected = sorted(p for p in in_scope - failed_paths if gaps.indexable(p, graph_now, content_now))
+        missing = [p for p in expected if gaps.missing_graph(p, graph_now) or gaps.missing_content(p, content_now)]
         for p in missing:
-            logger.warning("%s: not indexed (cloned, has indexable files, index has none)", p.relative_to(repos_dir))
+            logger.warning("%s: not indexed completely (graph %d, content %s)", p.relative_to(repos_dir), graph_now[p],
+                           content_now[p] if content_now else "n/a")
 
     write_config(_CONFIG_FILE, group_name, db_path, sorted(in_scope), repos_dir=repos_dir, gitlab_url=url)
 

@@ -458,10 +458,27 @@ class GraphStore:
         if not query.strip():
             return []
 
-        # Try FTS5 first
+        # Exact name matches first (case-sensitive, then case-insensitive), then the ranked search.
+        # Without this an exact hit can sit below dozens of BM25-favoured near-names, or fall outside
+        # the limit altogether.
+        exact = self._search_exact_name(query.strip(), limit)
+        seen = {n.id for n in exact}
+        want = limit + len(exact)  # the ranked pass may rediscover the exact nodes
         if self._has_fts():
-            return self._search_fts(query, limit)
-        return self._search_like(query, limit)
+            ranked = self._search_fts(query, want)
+        else:
+            ranked = self._search_like(query, want)
+        return (exact + [n for n in ranked if n.id not in seen])[:limit]
+
+    def _search_exact_name(self, query: str, limit: int) -> list[GraphNode]:
+        if any(c.isspace() for c in query):  # several words: not a name lookup
+            return []
+        rows = self._conn.execute(
+            "SELECT * FROM nodes WHERE LOWER(name) = LOWER(?) "
+            "ORDER BY (name = ?) DESC, file_path, line_start LIMIT ?",
+            (query, query, limit),
+        ).fetchall()
+        return [self._row_to_node(r) for r in rows]
 
     def _search_fts(self, query: str, limit: int) -> list[GraphNode]:
         """FTS5 search with BM25 ranking and prefix matching."""

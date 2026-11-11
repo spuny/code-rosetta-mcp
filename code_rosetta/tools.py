@@ -8,7 +8,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import os
+
+from . import config as _config
 from .config import cfg
+from .hits import HitResolver
 from .graph import GraphStore, edge_to_dict, node_to_dict
 from .incremental import (
     find_project_root,
@@ -18,6 +22,78 @@ from .incremental import (
     get_staged_and_unstaged,
     incremental_update,
 )
+
+
+# Server-side caps. A client-supplied limit above these is clamped, never trusted: one huge request
+# OOM-killed the only serving pod (QA r1, finding 2).
+GREP_MAX_MATCHES = 5_000
+GREP_MAX_FILES = 20_000
+SEARCH_MAX_RESULTS = 500
+GREP_MAX_RESPONSE_BYTES = 5_000_000
+# changed_files is client input for the impact/review tools: bound how many and how much of each is read.
+MAX_CHANGED_FILES = 50
+MAX_SNIPPET_FILE_BYTES = 2_000_000
+
+
+def _hit_resolver(group: str | None, root: Path | None, repos: list[Path] | None) -> HitResolver:
+    """Resolver over the configured repo roots (group) or the single repo root."""
+    meta = (cfg.get_group(group) or {}) if group else {}
+    repos_dir = meta.get("repos_dir")
+    try:
+        stamp = _config._CONFIG_FILE.stat().st_mtime
+    except OSError:
+        stamp = None
+    return HitResolver(
+        roots=repos if repos is not None else ([root] if root else []),
+        repos_dir=Path(repos_dir) if repos_dir else None,
+        gitlab_url=meta.get("gitlab_url") or os.environ.get("GITLAB_URL"),
+        stamp=stamp,
+    )
+
+
+def _bad_args(what: str, text: str, limit: int) -> dict[str, Any] | None:
+    """Reject arguments that used to be silently answered with arbitrary or truncated results."""
+    if not text.strip():
+        return {"status": "error", "error": f"{what} must not be empty"}
+    if limit < 1:
+        return {"status": "error", "error": f"limit must be >= 1 (got {limit})"}
+    return None
+
+
+def _clamp(limit: int, cap: int) -> tuple[int, dict[str, int] | None]:
+    if limit > cap:
+        return cap, {"requested": limit, "applied": cap}
+    return limit, None
+
+
+def _check_changed_files(
+    changed_files: list[str], root: Path | None, repos: list[Path] | None, strict: bool,
+) -> tuple[list[tuple[str, Path]] | None, dict[str, Any] | None]:
+    """Resolve each changed file (symlinks and ".." included) and require it to sit under a configured repo
+    root. Relative entries are taken relative to root, absolute ones as given.
+
+    strict (client-supplied list): the count is capped and any entry outside the roots rejects the whole
+    request. Not strict (auto-detected from git): unsafe entries are dropped, so a tracked symlink to
+    somewhere else cannot break a normal call.
+    Returns ([(original, resolved)], None) or (None, error result).
+    """
+    allowed = [r.resolve() for r in (repos if repos else ([root] if root else []))]
+    if not allowed or root is None:
+        return None, {"status": "error", "error": "no repository root is configured for this request"}
+    if strict and len(changed_files) > MAX_CHANGED_FILES:
+        return None, {"status": "error",
+                      "error": f"too many changed_files: {len(changed_files)} (max {MAX_CHANGED_FILES})"}
+    base = root.resolve()
+    checked: list[tuple[str, Path]] = []
+    for entry in changed_files:
+        p = Path(entry)
+        resolved = (p if p.is_absolute() else base / p).resolve()
+        if any(resolved == a or a in resolved.parents for a in allowed):
+            checked.append((entry, resolved))
+        elif strict:
+            return None, {"status": "error",
+                          "error": f"changed_files entry is outside the repository roots: {entry!r}"}
+    return checked, None
 
 
 def _validate_repo_root(path: Path) -> Path:
@@ -173,18 +249,26 @@ def get_impact_radius(
     group: str | None = None,
 ) -> dict[str, Any]:
     """Analyze the blast radius of changed files."""
-    store, root, _ = _resolve_store(group=group, repo_root=repo_root)
+    store, root, repos = _resolve_store(group=group, repo_root=repo_root)
     try:
+        supplied = changed_files is not None
         if changed_files is None:
             changed_files = get_changed_files(root, base)
             if not changed_files:
                 changed_files = get_staged_and_unstaged(root)
 
+        no_changes = {"status": "ok", "summary": "No changed files detected.",
+                      "changed_nodes": [], "impacted_nodes": [], "impacted_files": []}
         if not changed_files:
-            return {"status": "ok", "summary": "No changed files detected.",
-                    "changed_nodes": [], "impacted_nodes": [], "impacted_files": []}
+            return no_changes
+        checked, err = _check_changed_files(changed_files, root, repos, strict=supplied)
+        if err:
+            return err
+        if not checked:
+            return no_changes
+        changed_files = [orig for orig, _ in checked]
 
-        abs_files = [str(root / f) for f in changed_files]
+        abs_files = [str(resolved) for _, resolved in checked]
         result = store.get_impact_radius(abs_files, max_depth=max_depth, max_nodes=max_results)
 
         changed_dicts = [node_to_dict(n) for n in result["changed_nodes"]]
@@ -365,7 +449,10 @@ def search_nodes(
     group: str | None = None,
 ) -> dict[str, Any]:
     """Search for nodes by name, optionally filtered by kind and language."""
-    store, root, _ = _resolve_store(group=group, repo_root=repo_root)
+    if (bad := _bad_args("query", query, limit)):
+        return bad
+    limit, clamped = _clamp(limit, SEARCH_MAX_RESULTS)
+    store, root, repos = _resolve_store(group=group, repo_root=repo_root)
     try:
         results = store.search_nodes(query, limit=limit * 2)
         if kind:
@@ -374,7 +461,7 @@ def search_nodes(
             results = [r for r in results if r.language == language]
         results = results[:limit]
 
-        return {
+        out = {
             "status": "ok",
             "query": query,
             "summary": f"Found {len(results)} node(s) matching '{query}'"
@@ -382,6 +469,13 @@ def search_nodes(
             + (f" (language={language})" if language else ""),
             "results": [node_to_dict(r) for r in results],
         }
+        resolver = _hit_resolver(group, root, repos)
+        for d in out["results"]:
+            h = resolver.hit(d["file_path"], d.get("line_start"))
+            d.update(repo=h["repo"], path=h["path"], ref=h["ref"], web_url=h["web_url"])
+        if clamped:
+            out["limit_clamped"] = clamped
+        return out
     finally:
         store.close()
 
@@ -401,10 +495,18 @@ def grep_content(
     """Full-text or regex search over every indexed text file."""
     from .content import grep
 
-    store, _, _ = _resolve_store(group=group, repo_root=repo_root)
+    if (bad := _bad_args("pattern", pattern, limit)):
+        return bad
+    limit, clamped = _clamp(limit, GREP_MAX_FILES if files_only else GREP_MAX_MATCHES)
+    store, root, repos = _resolve_store(group=group, repo_root=repo_root)
     try:
-        return grep(store, pattern, regex=regex, ignore_case=ignore_case,
-                    path_glob=path_glob, limit=limit, files_only=files_only)
+        resolver = _hit_resolver(group, root, repos)
+        res = grep(store, pattern, regex=regex, ignore_case=ignore_case, path_glob=path_glob,
+                   limit=limit, files_only=files_only, max_bytes=GREP_MAX_RESPONSE_BYTES,
+                   hit_fn=resolver.hit, rel_name=resolver.qualified_name)
+        if res.get("status") == "ok" and clamped:
+            res["limit_clamped"] = clamped  # truncated stays whatever grep found: true only if cut
+        return res
     finally:
         store.close()
 
@@ -465,8 +567,9 @@ def get_review_context(
     group: str | None = None,
 ) -> dict[str, Any]:
     """Generate a focused review context from changed files."""
-    store, root, _ = _resolve_store(group=group, repo_root=repo_root)
+    store, root, repos = _resolve_store(group=group, repo_root=repo_root)
     try:
+        supplied = changed_files is not None
         if changed_files is None:
             changed_files = get_changed_files(root, base)
             if not changed_files:
@@ -474,8 +577,14 @@ def get_review_context(
 
         if not changed_files:
             return {"status": "ok", "summary": "No changes detected.", "context": {}}
+        checked, err = _check_changed_files(changed_files, root, repos, strict=supplied)
+        if err:
+            return err
+        if not checked:
+            return {"status": "ok", "summary": "No changes detected.", "context": {}}
+        changed_files = [orig for orig, _ in checked]
 
-        abs_files = [str(root / f) for f in changed_files]
+        abs_files = [str(resolved) for _, resolved in checked]
         impact = store.get_impact_radius(abs_files, max_depth=max_depth)
 
         context: dict[str, Any] = {
@@ -490,10 +599,13 @@ def get_review_context(
 
         if include_source:
             snippets = {}
-            for rel_path in changed_files:
-                full_path = root / rel_path
+            for rel_path, full_path in checked:
                 if full_path.is_file():
                     try:
+                        size = full_path.stat().st_size
+                        if size > MAX_SNIPPET_FILE_BYTES:
+                            snippets[rel_path] = f"(file too large: {size} bytes, limit {MAX_SNIPPET_FILE_BYTES})"
+                            continue
                         lines = full_path.read_text(errors="replace").splitlines()
                         if len(lines) > max_lines_per_file:
                             snippets[rel_path] = "\n".join(

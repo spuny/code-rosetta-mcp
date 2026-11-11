@@ -26,7 +26,8 @@ def list_projects(url: str, token: str, groups: list[str]) -> list[dict]:
         page = 1
         while True:
             q = urllib.parse.urlencode({
-                "include_subgroups": "true", "archived": "false", "simple": "true",
+                # not simple=true: that view omits empty_repo
+                "include_subgroups": "true", "archived": "false",
                 "per_page": 100, "page": page,
             })
             req = urllib.request.Request(
@@ -74,7 +75,8 @@ def mirror_project(project: dict, repos_dir: Path, env: dict) -> dict:
     branch = project.get("default_branch")
     dest = repos_dir / project["path_with_namespace"]
     out = {"path": dest, "action": "skipped", "changed": []}
-    if not branch:  # empty repository
+    # GitLab still reports default_branch (e.g. "main") for a repo with no commits.
+    if not branch or project.get("empty_repo"):
         return out
     try:
         if not (dest / ".git").is_dir():
@@ -100,15 +102,22 @@ def mirror_project(project: dict, repos_dir: Path, env: dict) -> dict:
     return out
 
 
-def write_config(config_path: Path, group_name: str, db_path: Path, repos: list[Path]) -> None:
+def write_config(config_path: Path, group_name: str, db_path: Path, repos: list[Path],
+                 repos_dir: Path | None = None, gitlab_url: str | None = None) -> None:
     from ruamel.yaml import YAML
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = config_path.with_suffix(".tmp")
     yaml = YAML()
     yaml.default_flow_style = False
+    group: dict = {"db": str(db_path), "repos": [str(r) for r in repos]}
+    # Lets the server turn a hit into <project, path, GitLab link> without any extra environment.
+    if repos_dir is not None:
+        group["repos_dir"] = str(repos_dir)
+    if gitlab_url:
+        group["gitlab_url"] = gitlab_url.rstrip("/")
     with open(tmp, "w") as f:
-        yaml.dump({"graphs": {group_name: {"db": str(db_path), "repos": [str(r) for r in repos]}}}, f)
+        yaml.dump({"graphs": {group_name: group}}, f)
     tmp.replace(config_path)
 
 
@@ -122,6 +131,80 @@ def purge_repo(store, repo_root: Path) -> None:
             store.remove_file_data(f)
     sync_content(store, repo_root)  # repo dir is gone, so every content row is removed
     store.commit()
+
+
+def _parseable_files(repo: Path) -> list[str]:
+    """Files the graph index would take."""
+    from .incremental import collect_all_files
+
+    return collect_all_files(repo)
+
+
+def _content_candidates(repo: Path) -> list[str]:
+    """Files the content (grep) index would take."""
+    from .content import _candidate_files
+
+    return _candidate_files(repo)
+
+
+def index_counts(store, repos: set[Path]) -> tuple[dict[Path, int], dict[Path, int] | None]:
+    """Indexed files per repo root, graph File nodes and content rows kept apart.
+
+    Graph rows are committed per file, content rows only when a repo's content sync ends, so a killed build
+    leaves one without the other. The content side is None when the content index is unavailable.
+    """
+    from .content import ensure_schema
+
+    roots = {str(r): r for r in repos}
+    graph: dict[Path, int] = {r: 0 for r in repos}
+
+    def owner(path: str) -> Path | None:
+        for parent in Path(path).parents:
+            if str(parent) in roots:
+                return roots[str(parent)]
+        return None
+
+    for f in store.get_all_files():
+        r = owner(f)
+        if r is not None:
+            graph[r] += 1
+    if not ensure_schema(store._conn):
+        return graph, None
+    content: dict[Path, int] = {r: 0 for r in repos}
+    for (path,) in store._conn.execute("SELECT path FROM file_content_meta"):
+        r = owner(path)
+        if r is not None:
+            content[r] += 1
+    return graph, content
+
+
+class _IndexGaps:
+    """Which indexes a repo is missing. The file scans only run for a zero count, once per repo per sync."""
+
+    def __init__(self) -> None:
+        self._parseable: dict[Path, bool] = {}
+        self._candidates: dict[Path, bool] = {}
+
+    def parseable(self, repo: Path) -> bool:
+        if repo not in self._parseable:
+            self._parseable[repo] = bool(_parseable_files(repo))
+        return self._parseable[repo]
+
+    def candidates(self, repo: Path) -> bool:
+        if repo not in self._candidates:
+            self._candidates[repo] = bool(_content_candidates(repo))
+        return self._candidates[repo]
+
+    def missing_graph(self, repo: Path, graph: dict[Path, int]) -> bool:
+        return graph[repo] == 0 and self.parseable(repo)
+
+    def missing_content(self, repo: Path, content: dict[Path, int] | None) -> bool:
+        return content is not None and content[repo] == 0 and self.candidates(repo)
+
+    def indexable(self, repo: Path, graph: dict[Path, int], content: dict[Path, int] | None) -> bool:
+        if graph[repo] or (content is not None and content[repo]):
+            return True
+        return self.parseable(repo) or (content is not None and self.candidates(repo))
 
 
 def sync(
@@ -154,12 +237,26 @@ def sync(
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
     removed = 0
+    gaps = _IndexGaps()
     with GraphStore(db_path) as store:
+        # Look at the index BEFORE building. A clone left without graph or content rows (a sync killed
+        # after the clone, or between the graph and the content commit) must get a full build whatever
+        # git says: incremental_update only builds the graph for changed files, so an update on top of
+        # an empty index would leave it half-indexed.
+        graph_before, content_before = index_counts(store, in_scope)
+        reindexed = 0
         for r in results:
+            path = r["path"]
             if r["action"] == "cloned":
-                full_build(r["path"], store)
+                full_build(path, store)
+            elif path in in_scope and (gaps.missing_graph(path, graph_before)
+                                       or gaps.missing_content(path, content_before)):
+                logger.warning("%s: index incomplete (graph %d, content %s), indexing now", path,
+                               graph_before[path], content_before[path] if content_before else "n/a")
+                full_build(path, store)
+                reindexed += 1
             elif r["action"] == "updated":
-                incremental_update(r["path"], store, changed_files=r["changed"])
+                incremental_update(path, store, changed_files=r["changed"])
 
         # Repos that were archived, deleted or moved out of scope.
         if not limit:
@@ -169,21 +266,34 @@ def sync(
                     purge_repo(store, root)
                     removed += 1
 
-        if counts.get("cloned") or counts.get("updated") or removed:
+        if counts.get("cloned") or counts.get("updated") or removed or reindexed:
             store.resolve_cross_file_calls()
             if store._has_fts():
                 store.rebuild_fts()
             store.commit()
         stats = store.get_stats()
 
-    write_config(_CONFIG_FILE, group_name, db_path, sorted(in_scope))
+        # Index health: every clone with something indexable must have its graph rows (if it has parseable
+        # files) and its content rows (if it has searchable files).
+        failed_paths = {r["path"] for r in results if r["action"] == "failed"}
+        graph_now, content_now = index_counts(store, in_scope)
+        expected = sorted(p for p in in_scope - failed_paths if gaps.indexable(p, graph_now, content_now))
+        missing = [p for p in expected if gaps.missing_graph(p, graph_now) or gaps.missing_content(p, content_now)]
+        for p in missing:
+            logger.warning("%s: not indexed completely (graph %d, content %s)", p.relative_to(repos_dir), graph_now[p],
+                           content_now[p] if content_now else "n/a")
+
+    write_config(_CONFIG_FILE, group_name, db_path, sorted(in_scope), repos_dir=repos_dir, gitlab_url=url)
 
     return {
         "projects": len(projects),
         **counts,
         "removed": removed,
+        "reindexed": reindexed,
         "failed": counts.get("failed", 0),
-        "ok": len(in_scope) > 0,
+        "indexed_repos": len(expected) - len(missing),
+        "expected_repos": len(expected),
+        "ok": len(in_scope) > 0 and not missing,
         "nodes": stats.total_nodes,
         "files": stats.files_count,
         "git_seconds": round(t_git, 1),

@@ -48,7 +48,17 @@ class Config:
 
     @property
     def groups(self) -> dict[str, dict[str, Any]]:
-        return self._data.get("graphs", {})
+        return self._data.get("graphs") or {}
+
+    @property
+    def default_group(self) -> Optional[str]:
+        """Group a client gets when it names none: ROSETTA_DEFAULT_GROUP, then `default_group` in the
+        config file, then the only configured group. None when there is no way to tell."""
+        named = os.environ.get("ROSETTA_DEFAULT_GROUP", "").strip() or self._data.get("default_group")
+        if named:
+            return str(named)
+        names = list(self.groups)
+        return names[0] if len(names) == 1 else None
 
     def get_group(self, name: str) -> Optional[dict[str, Any]]:
         return self.groups.get(name)

@@ -8,6 +8,7 @@ from typing import Any, Optional
 from fastmcp import FastMCP
 from fastmcp.tools.tool import ToolResult
 
+from . import config as _config
 from .tools import (
     build_or_update_graph,
     get_impact_radius,
@@ -33,10 +34,29 @@ mcp = FastMCP(
         "Cross-language codebase graph for token-efficient code understanding. "
         "Parses Python, Terraform/HCL, YAML, and Jinja2 into a unified knowledge graph "
         "with cross-language reference detection. "
-        "Use the 'group' parameter to query named config groups (e.g. group='mygroup') "
-        "for cross-repo analysis. Available groups: use list_graph_stats_tool to check."
+        "The 'group' parameter is optional: when omitted the server uses its default group "
+        "(ROSETTA_DEFAULT_GROUP, or the only configured group). Pass group='<name>' to pick another."
     ),
 )
+
+
+def _pick_group(group: str | None, repo_root: str | None) -> tuple[str | None, dict[str, Any] | None]:
+    """The group a call runs against, or an error result. An explicit group or repo_root wins; otherwise the
+    server's default group. Without one, a server with several groups must not fall back to its working
+    directory (in the container that is not a project and not writable)."""
+    if group or repo_root or _default_repo_root:
+        return group, None
+    default = _config.cfg.default_group
+    if default:
+        return default, None
+    names = _config.cfg.list_groups()
+    if len(names) > 1:
+        return None, {
+            "status": "error",
+            "error": f"No group given and this server has no default group. Pass group='<name>'. "
+                     f"Available groups: {names}",
+        }
+    return None, None
 
 
 @mcp.tool()
@@ -88,8 +108,12 @@ def get_impact_radius_tool(
         max_depth: Hops to traverse. Default: 2.
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for change detection. Default: HEAD~1.
-        group: Named config group. Opens the group's shared DB for cross-repo analysis.
+        group: Named config group. Optional: when omitted the server's default group is used
+            (ROSETTA_DEFAULT_GROUP, or the only configured group).
     """
+    group, err = _pick_group(group, repo_root)
+    if err:
+        return _flag_errors(err)
     return _flag_errors(get_impact_radius(
         changed_files=changed_files, max_depth=max_depth,
         repo_root=repo_root or _default_repo_root, base=base,
@@ -122,8 +146,12 @@ def query_graph_tool(
         pattern: Query pattern name.
         target: Node name, qualified name, or file path.
         repo_root: Repository root path. Auto-detected if omitted.
-        group: Named config group. Opens the group's shared DB for cross-repo queries.
+        group: Named config group. Optional: when omitted the server's default group is used
+            (ROSETTA_DEFAULT_GROUP, or the only configured group).
     """
+    group, err = _pick_group(group, repo_root)
+    if err:
+        return _flag_errors(err)
     return _flag_errors(query_graph(
         pattern=pattern, target=target,
         repo_root=repo_root or _default_repo_root,
@@ -155,8 +183,12 @@ def search_nodes_tool(
         limit: Max results. Default: 20. Server cap: 500; a larger limit is clamped and the result says
             so in limit_clamped ({requested, applied}).
         repo_root: Repository root path. Auto-detected if omitted.
-        group: Named config group. Searches across all repos in the group.
+        group: Named config group. Optional: when omitted the server's default group is used
+            (ROSETTA_DEFAULT_GROUP, or the only configured group).
     """
+    group, err = _pick_group(group, repo_root)
+    if err:
+        return _flag_errors(err)
     return _flag_errors(search_nodes(
         query=query, kind=kind, language=language,
         limit=limit, repo_root=repo_root or _default_repo_root,
@@ -176,8 +208,12 @@ def list_graph_stats_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
-        group: Named config group. Shows stats for the group's shared graph.
+        group: Named config group. Optional: when omitted the server's default group is used
+            (ROSETTA_DEFAULT_GROUP, or the only configured group).
     """
+    group, err = _pick_group(group, repo_root)
+    if err:
+        return _flag_errors(err)
     return _flag_errors(list_graph_stats(repo_root=repo_root or _default_repo_root, group=group))
 
 
@@ -207,8 +243,12 @@ def get_review_context_tool(
         max_lines_per_file: Max source lines per file. Default: 200.
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for change detection. Default: HEAD~1.
-        group: Named config group. Uses the group's shared graph for cross-repo context.
+        group: Named config group. Optional: when omitted the server's default group is used
+            (ROSETTA_DEFAULT_GROUP, or the only configured group).
     """
+    group, err = _pick_group(group, repo_root)
+    if err:
+        return _flag_errors(err)
     return _flag_errors(get_review_context(
         changed_files=changed_files, max_depth=max_depth,
         include_source=include_source, max_lines_per_file=max_lines_per_file,
@@ -252,8 +292,12 @@ def grep_code_tool(
             ({requested, applied}).
         files_only: Return matching file paths only (also listed with repo/path/ref/web_url in file_hits).
         repo_root: Repository root path. Auto-detected if omitted.
-        group: Named config group. Searches across all repos in the group.
+        group: Named config group. Optional: when omitted the server's default group is used
+            (ROSETTA_DEFAULT_GROUP, or the only configured group).
     """
+    group, err = _pick_group(group, repo_root)
+    if err:
+        return _flag_errors(err)
     return _flag_errors(grep_content(
         pattern=pattern, regex=regex, ignore_case=ignore_case,
         path_glob=path_glob, limit=limit, files_only=files_only,
@@ -287,6 +331,8 @@ plus a cross-language graph (who calls what, what references what). It speaks MC
 {tools}
 </ul>
 <p>Each hit carries <code>repo</code>, <code>path</code>, <code>ref</code> and <code>web_url</code> (a GitLab link at the indexed commit).</p>
+<p>The <code>group</code> argument is optional: leave it out and the server uses its default group
+(<code>ROSETTA_DEFAULT_GROUP</code>, or the only configured group).</p>
 <h2>For humans</h2>
 <p>There is no web search UI yet: use Sourcebot for searching in a browser.</p>
 </body></html>

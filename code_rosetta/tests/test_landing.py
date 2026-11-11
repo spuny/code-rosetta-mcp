@@ -42,3 +42,8 @@ def test_healthz_and_mcp_route_still_work():
     with TestClient(mcp.http_app()) as c:  # lifespan running, as in production
         assert c.get("/healthz").text == "ok"
         assert c.get("/mcp").status_code in (400, 405, 406)  # the MCP endpoint, not the landing page
+
+
+def test_page_says_group_is_optional():
+    html = _get().text
+    assert "ROSETTA_DEFAULT_GROUP" in html and "optional" in html

@@ -20,6 +20,20 @@ from .incremental import (
 )
 
 
+# Server-side caps. A client-supplied limit above these is clamped, never trusted: one huge request
+# OOM-killed the only serving pod (QA r1, finding 2).
+GREP_MAX_MATCHES = 5_000
+GREP_MAX_FILES = 20_000
+SEARCH_MAX_RESULTS = 500
+GREP_MAX_RESPONSE_BYTES = 5_000_000
+
+
+def _clamp(limit: int, cap: int) -> tuple[int, dict[str, int] | None]:
+    if limit > cap:
+        return cap, {"requested": limit, "applied": cap}
+    return limit, None
+
+
 def _validate_repo_root(path: Path) -> Path:
     resolved = path.resolve()
     if not resolved.is_dir():
@@ -365,6 +379,7 @@ def search_nodes(
     group: str | None = None,
 ) -> dict[str, Any]:
     """Search for nodes by name, optionally filtered by kind and language."""
+    limit, clamped = _clamp(limit, SEARCH_MAX_RESULTS)
     store, root, _ = _resolve_store(group=group, repo_root=repo_root)
     try:
         results = store.search_nodes(query, limit=limit * 2)
@@ -374,7 +389,7 @@ def search_nodes(
             results = [r for r in results if r.language == language]
         results = results[:limit]
 
-        return {
+        out = {
             "status": "ok",
             "query": query,
             "summary": f"Found {len(results)} node(s) matching '{query}'"
@@ -382,6 +397,9 @@ def search_nodes(
             + (f" (language={language})" if language else ""),
             "results": [node_to_dict(r) for r in results],
         }
+        if clamped:
+            out["limit_clamped"] = clamped
+        return out
     finally:
         store.close()
 
@@ -401,10 +419,14 @@ def grep_content(
     """Full-text or regex search over every indexed text file."""
     from .content import grep
 
+    limit, clamped = _clamp(limit, GREP_MAX_FILES if files_only else GREP_MAX_MATCHES)
     store, _, _ = _resolve_store(group=group, repo_root=repo_root)
     try:
-        return grep(store, pattern, regex=regex, ignore_case=ignore_case,
-                    path_glob=path_glob, limit=limit, files_only=files_only)
+        res = grep(store, pattern, regex=regex, ignore_case=ignore_case, path_glob=path_glob,
+                   limit=limit, files_only=files_only, max_bytes=GREP_MAX_RESPONSE_BYTES)
+        if clamped and res.get("status") == "ok":
+            res["limit_clamped"] = clamped  # truncated stays whatever grep found: true only if cut
+        return res
     finally:
         store.close()
 

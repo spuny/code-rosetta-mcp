@@ -156,7 +156,9 @@ def grep(
     path_glob: str | None = None,
     limit: int = 100,
     files_only: bool = False,
+    max_bytes: int = 0,
 ) -> dict[str, Any]:
+    """max_bytes > 0 bounds the response size (path + line text per hit); hitting it sets truncated."""
     conn = store._conn
     if not ensure_schema(conn):
         return {"status": "error", "error": "content index unavailable (SQLite trigram tokenizer missing)"}
@@ -181,11 +183,16 @@ def grep(
     matches: list[dict[str, Any]] = []
     files: list[str] = []
     truncated = False
+    used = 0
     for path, body in rows:
         if path_glob and not fnmatch.fnmatch(path, path_glob):
             continue
         if files_only:
             if rx.search(body):
+                used += len(path)
+                if max_bytes and used > max_bytes and files:
+                    truncated = True
+                    break
                 files.append(path)
                 if len(files) >= limit:
                     truncated = True
@@ -194,8 +201,13 @@ def grep(
         hit = False
         for n, line in enumerate(body.splitlines(), 1):
             if rx.search(line):
+                text = line[:MAX_LINE_CHARS]
+                used += len(path) + len(text)
+                if max_bytes and used > max_bytes and matches:
+                    truncated = True
+                    break
                 hit = True
-                matches.append({"path": path, "line": n, "text": line[:MAX_LINE_CHARS]})
+                matches.append({"path": path, "line": n, "text": text})
                 if len(matches) >= limit:
                     truncated = True
                     break

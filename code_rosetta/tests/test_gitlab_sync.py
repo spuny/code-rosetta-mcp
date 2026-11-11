@@ -41,9 +41,9 @@ def _commit(work, files, bare=None):
     _run(["git", "push", "-q", "origin", "main"], work)
 
 
-def _project(pid, path, bare, branch="main"):
+def _project(pid, path, bare, branch="main", empty=False):
     return {"id": pid, "path_with_namespace": path, "default_branch": branch,
-            "http_url_to_repo": f"file://{bare}"}
+            "http_url_to_repo": f"file://{bare}", "empty_repo": empty}
 
 
 @pytest.fixture
@@ -83,7 +83,7 @@ def test_clone_update_and_purge(env, monkeypatch):
     empty = tmp / "remote" / "empty.git"
     _run(["git", "init", "-q", "--bare", str(empty)], tmp)
     projects = [_project(1, "devops/a", a_bare), _project(2, "devops/b", b_bare),
-                _project(3, "devops/empty", empty, branch=None)]
+                _project(3, "devops/empty", empty, empty=True)]  # GitLab sends default_branch=main
 
     r = _sync(tmp, monkeypatch, projects)
     assert (r["cloned"], r["skipped"], r["ok"]) == (2, 1, True)
@@ -141,6 +141,18 @@ def test_list_projects_paginates_and_dedups(monkeypatch):
     out = gitlab_sync.list_projects("https://gl", "tok", ["devops", "data"])
     assert [p["path_with_namespace"] for p in out] == ["data/c", "devops/a", "devops/b"]
     assert set(seen_headers) == {"tok"}
+
+
+def test_list_projects_requests_empty_repo_field(monkeypatch):
+    urls = []
+
+    def fake_urlopen(req, timeout):
+        urls.append(req.full_url)
+        return io.BytesIO(b"[]")
+
+    monkeypatch.setattr(gitlab_sync.urllib.request, "urlopen", fake_urlopen)
+    gitlab_sync.list_projects("https://gl", "tok", ["devops"])
+    assert "simple=" not in urls[0]
 
 
 def test_config_path_from_env(tmp_path, monkeypatch):

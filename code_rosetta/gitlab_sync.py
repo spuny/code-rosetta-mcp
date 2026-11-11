@@ -26,7 +26,8 @@ def list_projects(url: str, token: str, groups: list[str]) -> list[dict]:
         page = 1
         while True:
             q = urllib.parse.urlencode({
-                "include_subgroups": "true", "archived": "false", "simple": "true",
+                # not simple=true: that view omits empty_repo
+                "include_subgroups": "true", "archived": "false",
                 "per_page": 100, "page": page,
             })
             req = urllib.request.Request(
@@ -74,7 +75,8 @@ def mirror_project(project: dict, repos_dir: Path, env: dict) -> dict:
     branch = project.get("default_branch")
     dest = repos_dir / project["path_with_namespace"]
     out = {"path": dest, "action": "skipped", "changed": []}
-    if not branch:  # empty repository
+    # GitLab still reports default_branch (e.g. "main") for a repo with no commits.
+    if not branch or project.get("empty_repo"):
         return out
     try:
         if not (dest / ".git").is_dir():

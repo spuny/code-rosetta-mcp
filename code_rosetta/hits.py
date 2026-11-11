@@ -67,6 +67,13 @@ class HitResolver:
                 pass
         return root.name
 
+    def qualified_name(self, abs_path: str) -> str | None:
+        """"<repo>/<path in repo>" for a file under a known root: the form a hit reports as repo + path."""
+        root = self._owner(abs_path)
+        if root is None:
+            return None
+        return f"{self._repo_name(root)}/{Path(abs_path).relative_to(root).as_posix()}"
+
     def hit(self, abs_path: str, line: int | None = None) -> dict[str, Any]:
         root = self._owner(abs_path)
         if root is None:

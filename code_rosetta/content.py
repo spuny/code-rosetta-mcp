@@ -162,13 +162,15 @@ def grep(
     files_only: bool = False,
     max_bytes: int = 0,
     hit_fn: Callable[[str, int | None], dict[str, Any]] | None = None,
+    rel_name: Callable[[str], str | None] | None = None,
 ) -> dict[str, Any]:
     """Search the content index.
 
     max_bytes > 0 bounds the response on the wire: every item is measured as it will be sent (enriched by
     hit_fn, counted WIRE_COPIES times) and hitting the budget sets truncated.
     hit_fn(abs_path, line) -> extra fields merged into each match (and, with files_only, one entry per
-    file in file_hits).
+    file in file_hits). rel_name(abs_path) -> "<repo>/<path in repo>", so path_glob also matches the form
+    a hit reports.
     """
     conn = store._conn
     if not ensure_schema(conn):
@@ -194,13 +196,19 @@ def grep(
     def cost(obj: Any) -> int:
         return WIRE_COPIES * (len(json.dumps(obj, ensure_ascii=False).encode()) + 2)
 
+    def glob_ok(path: str) -> bool:
+        if not path_glob or fnmatch.fnmatch(path, path_glob):
+            return True
+        name = rel_name(path) if rel_name else None
+        return bool(name and fnmatch.fnmatch(name, path_glob))
+
     matches: list[dict[str, Any]] = []
     files: list[str] = []
     file_hits: list[dict[str, Any]] = []
     truncated = False
     used = 0
     for path, body in rows:
-        if path_glob and not fnmatch.fnmatch(path, path_glob):
+        if not glob_ok(path):
             continue
         if files_only:
             if rx.search(body):

@@ -462,7 +462,7 @@ def grep_content(
         resolver = _hit_resolver(group, root, repos)
         res = grep(store, pattern, regex=regex, ignore_case=ignore_case, path_glob=path_glob,
                    limit=limit, files_only=files_only, max_bytes=GREP_MAX_RESPONSE_BYTES,
-                   hit_fn=resolver.hit)
+                   hit_fn=resolver.hit, rel_name=resolver.qualified_name)
         if res.get("status") == "ok" and clamped:
             res["limit_clamped"] = clamped  # truncated stays whatever grep found: true only if cut
         return res

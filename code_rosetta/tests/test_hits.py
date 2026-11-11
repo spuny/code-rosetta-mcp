@@ -142,3 +142,29 @@ def test_ref_lookup_survives_the_cache_being_cleared_by_another_thread(monkeypat
     monkeypatch.setattr(hits, "_REF_STAMP", 1.0)
     monkeypatch.setattr(hits, "_git_head", lambda root: "abc123")
     assert hits._ref_for(tmp_path, 1.0) == "abc123"
+
+
+def test_path_glob_accepts_the_repo_and_path_a_hit_reports(synced):
+    """An agent copies `repo + "/" + path` from a hit into path_glob to narrow the next search."""
+    res = tools.grep_content("ghcr.io/x/web", group="acme")
+    (m,) = res["matches"]
+    narrowed = tools.grep_content("image", group="acme", path_glob=f"{m['repo']}/{m['path']}")
+    assert [x["repo"] for x in narrowed["matches"]] == [m["repo"]]
+    assert narrowed["matches"][0]["path"] == m["path"]
+
+    only_repo = tools.grep_content("resource", group="acme", path_glob="acme/apis/clients/*")
+    assert [x["repo"] for x in only_repo["matches"]] == ["acme/apis/clients"]
+
+    wrong = tools.grep_content("image", group="acme", path_glob="acme/apis/clients/src/deploy.yaml")
+    assert wrong["matches"] == []
+
+
+def test_path_glob_on_the_absolute_path_still_works(synced):
+    res = tools.grep_content("ghcr.io/x/web", group="acme", path_glob="*/orders-api/src/*")
+    assert len(res["matches"]) == 1
+
+
+def test_path_glob_repo_form_works_with_files_only(synced):
+    res = tools.grep_content("aws_s3_bucket", group="acme", files_only=True,
+                             path_glob="acme/apis/clients/x.tf")
+    assert len(res["files"]) == 1

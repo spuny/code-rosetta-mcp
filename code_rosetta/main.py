@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Optional
+import json
+from typing import Any, Optional
 
 from fastmcp import FastMCP
+from fastmcp.tools.tool import ToolResult
 
 from .tools import (
     build_or_update_graph,
@@ -17,6 +19,13 @@ from .tools import (
 )
 
 _default_repo_root: str | None = None
+
+
+def _flag_errors(result: dict[str, Any]) -> Any:
+    """A result with status "error" must reach the client as isError, so agents don't read it as empty."""
+    if isinstance(result, dict) and result.get("status") == "error":
+        return ToolResult(content=json.dumps(result), structured_content=result, is_error=True)
+    return result
 
 mcp = FastMCP(
     "code-rosetta",
@@ -49,12 +58,12 @@ def build_or_update_graph_tool(
         group: Named config group (e.g. 'mygroup'). Builds all repos in the group.
                Takes precedence over repo_root.
     """
-    return build_or_update_graph(
+    return _flag_errors(build_or_update_graph(
         full_rebuild=full_rebuild,
         repo_root=repo_root or _default_repo_root,
         base=base,
         group=group,
-    )
+    ))
 
 
 @mcp.tool()
@@ -70,18 +79,22 @@ def get_impact_radius_tool(
     Shows impacted functions, classes, resources, and templates.
     Includes cross-language impact (e.g., Python change affecting YAML config).
 
+    changed_files must be under a configured repo root (max 50); anything outside is rejected.
+
     Args:
-        changed_files: Changed file paths. Auto-detected from git if omitted.
+        changed_files: Changed file paths, at most 50. Relative to the repo root, or absolute; every
+            path must resolve to a file under a configured repo root (a path outside, a ".." escape
+            or a symlink pointing out is rejected with an error). Auto-detected from git if omitted.
         max_depth: Hops to traverse. Default: 2.
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for change detection. Default: HEAD~1.
         group: Named config group. Opens the group's shared DB for cross-repo analysis.
     """
-    return get_impact_radius(
+    return _flag_errors(get_impact_radius(
         changed_files=changed_files, max_depth=max_depth,
         repo_root=repo_root or _default_repo_root, base=base,
         group=group,
-    )
+    ))
 
 
 @mcp.tool()
@@ -111,11 +124,11 @@ def query_graph_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         group: Named config group. Opens the group's shared DB for cross-repo queries.
     """
-    return query_graph(
+    return _flag_errors(query_graph(
         pattern=pattern, target=target,
         repo_root=repo_root or _default_repo_root,
         group=group,
-    )
+    ))
 
 
 @mcp.tool()
@@ -130,21 +143,25 @@ def search_nodes_tool(
     """Search for code entities by name across all languages.
 
     Supports filtering by node kind (Function, Class, Resource, Variable, etc.)
-    and by language (python, hcl, yaml, jinja2).
+    and by language (python, hcl, yaml, jinja2). Exact name matches come first.
+
+    Each result has repo (GitLab project path), path (relative to the repo), ref, web_url
+    and file_path (absolute path on the server).
 
     Args:
         query: Search string.
         kind: Filter by node kind.
         language: Filter by language.
-        limit: Max results. Default: 20.
+        limit: Max results. Default: 20. Server cap: 500; a larger limit is clamped and the result says
+            so in limit_clamped ({requested, applied}).
         repo_root: Repository root path. Auto-detected if omitted.
         group: Named config group. Searches across all repos in the group.
     """
-    return search_nodes(
+    return _flag_errors(search_nodes(
         query=query, kind=kind, language=language,
         limit=limit, repo_root=repo_root or _default_repo_root,
         group=group,
-    )
+    ))
 
 
 @mcp.tool()
@@ -161,7 +178,7 @@ def list_graph_stats_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         group: Named config group. Shows stats for the group's shared graph.
     """
-    return list_graph_stats(repo_root=repo_root or _default_repo_root, group=group)
+    return _flag_errors(list_graph_stats(repo_root=repo_root or _default_repo_root, group=group))
 
 
 @mcp.tool()
@@ -178,21 +195,26 @@ def get_review_context_tool(
 
     Combines cross-language impact analysis with source snippets.
 
+    changed_files must be under a configured repo root (max 50); anything outside is rejected.
+    A file over 2 MB gets no snippet.
+
     Args:
-        changed_files: Files to review. Auto-detected if omitted.
+        changed_files: Files to review, at most 50. Relative to the repo root, or absolute; every path
+            must resolve to a file under a configured repo root (a path outside, a ".." escape or a
+            symlink pointing out is rejected with an error). Auto-detected if omitted.
         max_depth: Impact radius depth. Default: 2.
-        include_source: Include source snippets. Default: True.
+        include_source: Include source snippets. Default: True. A file over 2 MB is not read.
         max_lines_per_file: Max source lines per file. Default: 200.
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for change detection. Default: HEAD~1.
         group: Named config group. Uses the group's shared graph for cross-repo context.
     """
-    return get_review_context(
+    return _flag_errors(get_review_context(
         changed_files=changed_files, max_depth=max_depth,
         include_source=include_source, max_lines_per_file=max_lines_per_file,
         repo_root=repo_root or _default_repo_root, base=base,
         group=group,
-    )
+    ))
 
 
 @mcp.tool()
@@ -212,28 +234,103 @@ def grep_code_tool(
     "is X anywhere in code". Use search_nodes_tool / query_graph_tool for
     structure (who calls, what references).
 
+    Result: "truncated" is true when results were cut, by limit or by the ~5 MB response
+    budget, so a short list with truncated=true is not the whole answer: narrow the query
+    (path_glob). Each match has repo (GitLab project path), path (relative to the repo),
+    line, text, ref (commit of the indexed checkout), web_url (GitLab link with #L<line>)
+    and abs_path (path on the server). repo/ref/web_url are null outside the synced group.
+
     Args:
         pattern: Literal text, or a Python regex when regex=True.
         regex: Treat pattern as a regex.
         ignore_case: Case-insensitive match.
-        path_glob: fnmatch filter on the absolute path, e.g. "*/infra*/cluster/*".
-        limit: Max matching lines (or files with files_only). Default: 100.
-        files_only: Return matching file paths only.
+        path_glob: fnmatch filter. Matches the absolute path (abs_path), e.g. "*/infra*/cluster/*",
+            and also the form a hit reports as repo + path: pass "<repo>/<path>" from a hit
+            (e.g. "acme/apis/clients/x.tf") to narrow to that file.
+        limit: Max matching lines (or files with files_only). Default: 100. Server caps: 5,000 lines,
+            20,000 files. A larger limit is clamped and the result says so in limit_clamped
+            ({requested, applied}).
+        files_only: Return matching file paths only (also listed with repo/path/ref/web_url in file_hits).
         repo_root: Repository root path. Auto-detected if omitted.
         group: Named config group. Searches across all repos in the group.
     """
-    return grep_content(
+    return _flag_errors(grep_content(
         pattern=pattern, regex=regex, ignore_case=ignore_case,
         path_glob=path_glob, limit=limit, files_only=files_only,
         repo_root=repo_root or _default_repo_root, group=group,
-    )
+    ))
 
 
-def main(repo_root: str | None = None) -> None:
-    """Run the MCP server via stdio."""
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(_request):
+    from starlette.responses import PlainTextResponse
+
+    return PlainTextResponse("ok")
+
+
+_LANDING = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Code Rosetta</title>
+<style>body{{font:16px/1.5 system-ui,sans-serif;max-width:46rem;margin:3rem auto;padding:0 1rem;color:#222}}
+code,pre{{background:#f3f3f3;border-radius:4px;padding:.1rem .3rem}}pre{{padding:.7rem;overflow-x:auto}}</style>
+</head><body>
+<h1>Code Rosetta</h1>
+<p>A shared code-search server for agents and tools: grep over every file in the indexed GitLab projects,
+plus a cross-language graph (who calls what, what references what). It speaks MCP, not HTML.</p>
+<h2>Endpoint</h2>
+<p><code>{endpoint}</code> (streamable HTTP MCP)</p>
+<h2>Connect</h2>
+<p>Claude Code:</p>
+<pre>claude mcp add --transport http rosetta {endpoint}</pre>
+<p>Any other MCP client: add an HTTP server with the URL above.</p>
+<h2>Tools</h2>
+<ul>
+{tools}
+</ul>
+<p>Each hit carries <code>repo</code>, <code>path</code>, <code>ref</code> and <code>web_url</code> (a GitLab link at the indexed commit).</p>
+<h2>For humans</h2>
+<p>There is no web search UI yet: use Sourcebot for searching in a browser.</p>
+</body></html>
+"""
+
+
+@mcp.custom_route("/", methods=["GET"])
+async def landing(request):
+    import html
+
+    from starlette.responses import HTMLResponse
+
+    scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("host") or request.url.netloc
+    endpoint = html.escape(f"{scheme}://{host}/mcp", quote=True)
+    try:
+        tools = sorted(await mcp.list_tools(), key=lambda t: t.name)
+        items = "\n".join(
+            f"<li><code>{html.escape(t.name)}</code> &mdash; "
+            f"{html.escape((t.description or '').strip().splitlines()[0] if t.description else '')}</li>"
+            for t in tools
+        )
+    except Exception:  # noqa: BLE001 -- the page must render even if tool listing breaks
+        items = "<li>see <code>tools/list</code> on the endpoint</li>"
+    return HTMLResponse(_LANDING.format(endpoint=endpoint, tools=items))
+
+
+def main(
+    repo_root: str | None = None,
+    transport: str = "stdio",
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    read_only: bool = False,
+) -> None:
+    """Run the MCP server (stdio by default, or streamable HTTP)."""
     global _default_repo_root
     _default_repo_root = repo_root
-    mcp.run(transport="stdio")
+    if read_only:
+        # Shared server: the index is owned by sync-gitlab, clients must not rebuild it.
+        mcp.remove_tool("build_or_update_graph_tool")
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        mcp.run(transport="http", host=host, port=port, path="/mcp", stateless_http=True)
 
 
 if __name__ == "__main__":

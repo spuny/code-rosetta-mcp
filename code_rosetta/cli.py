@@ -398,11 +398,46 @@ def review_context(base, files, depth, no_source, group, repo, as_json):
 @main.command()
 @click.option("--repo", default=None, help="Repository root (auto-detected)")
 @click.option("--db", default=None, help="Path to graph database (overrides config)")
-def serve(repo, db):
-    """Start MCP server (stdio transport)."""
+@click.option("--transport", type=click.Choice(["stdio", "http"]), default="stdio", show_default=True)
+@click.option("--host", default="127.0.0.1", show_default=True, help="HTTP bind address")
+@click.option("--port", default=8000, show_default=True, help="HTTP port")
+@click.option("--read-only", is_flag=True, help="Hide the build/update tool (shared server)")
+def serve(repo, db, transport, host, port, read_only):
+    """Start MCP server (stdio, or streamable HTTP at /mcp)."""
     _ensure_parsers()
     from .main import main as serve_main
-    serve_main(repo_root=repo)
+    serve_main(repo_root=repo, transport=transport, host=host, port=port, read_only=read_only)
+
+
+@main.command("sync-gitlab")
+@click.option("--url", envvar="GITLAB_URL", required=True, help="GitLab base URL")
+@click.option("--token-env", default="GITLAB_TOKEN", show_default=True, help="Env var holding the token")
+@click.option("--groups", envvar="GITLAB_GROUPS", required=True, help="Comma-separated top-level groups")
+@click.option("--repos-dir", envvar="ROSETTA_REPOS_DIR", required=True, type=click.Path(path_type=Path))
+@click.option("--db", "db_path", envvar="ROSETTA_DB", required=True, type=click.Path(path_type=Path))
+@click.option("--group-name", default="default", show_default=True, help="Config group to write")
+@click.option("--workers", default=8, show_default=True, help="Parallel clone/fetch workers")
+@click.option("--limit", default=0, help="Only the first N projects (testing)")
+def sync_gitlab_cmd(url, token_env, groups, repos_dir, db_path, group_name, workers, limit):
+    """Mirror GitLab groups' default branches and update the index."""
+    import os
+
+    _ensure_parsers()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+    from .gitlab_sync import sync
+
+    token = os.environ.get(token_env)
+    if not token:
+        click.echo(f"${token_env} is not set", err=True)
+        sys.exit(1)
+    result = sync(
+        url=url, token=token, groups=[g.strip() for g in groups.split(",") if g.strip()],
+        repos_dir=repos_dir, db_path=db_path, group_name=group_name,
+        workers=workers, limit=limit,
+    )
+    click.echo(json.dumps(result, indent=2))
+    if not result["ok"]:
+        sys.exit(2)
 
 
 @main.command()

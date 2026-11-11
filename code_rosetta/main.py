@@ -245,6 +245,52 @@ async def healthz(_request):
     return PlainTextResponse("ok")
 
 
+_LANDING = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Code Rosetta</title>
+<style>body{{font:16px/1.5 system-ui,sans-serif;max-width:46rem;margin:3rem auto;padding:0 1rem;color:#222}}
+code,pre{{background:#f3f3f3;border-radius:4px;padding:.1rem .3rem}}pre{{padding:.7rem;overflow-x:auto}}</style>
+</head><body>
+<h1>Code Rosetta</h1>
+<p>A shared code-search server for agents and tools: grep over every file in the indexed GitLab projects,
+plus a cross-language graph (who calls what, what references what). It speaks MCP, not HTML.</p>
+<h2>Endpoint</h2>
+<p><code>{endpoint}</code> (streamable HTTP MCP)</p>
+<h2>Connect</h2>
+<p>Claude Code:</p>
+<pre>claude mcp add --transport http rosetta {endpoint}</pre>
+<p>Any other MCP client: add an HTTP server with the URL above.</p>
+<h2>Tools</h2>
+<ul>
+{tools}
+</ul>
+<p>Each hit carries <code>repo</code>, <code>path</code>, <code>ref</code> and <code>web_url</code> (a GitLab link at the indexed commit).</p>
+<h2>For humans</h2>
+<p>There is no web search UI yet: use Sourcebot for searching in a browser.</p>
+</body></html>
+"""
+
+
+@mcp.custom_route("/", methods=["GET"])
+async def landing(request):
+    import html
+
+    from starlette.responses import HTMLResponse
+
+    scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("host") or request.url.netloc
+    endpoint = html.escape(f"{scheme}://{host}/mcp", quote=True)
+    try:
+        tools = sorted(await mcp.list_tools(), key=lambda t: t.name)
+        items = "\n".join(
+            f"<li><code>{html.escape(t.name)}</code> &mdash; "
+            f"{html.escape((t.description or '').strip().splitlines()[0] if t.description else '')}</li>"
+            for t in tools
+        )
+    except Exception:  # noqa: BLE001 -- the page must render even if tool listing breaks
+        items = "<li>see <code>tools/list</code> on the endpoint</li>"
+    return HTMLResponse(_LANDING.format(endpoint=endpoint, tools=items))
+
+
 def main(
     repo_root: str | None = None,
     transport: str = "stdio",

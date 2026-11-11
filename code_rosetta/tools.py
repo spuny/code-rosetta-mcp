@@ -459,19 +459,12 @@ def grep_content(
     limit, clamped = _clamp(limit, GREP_MAX_FILES if files_only else GREP_MAX_MATCHES)
     store, root, repos = _resolve_store(group=group, repo_root=repo_root)
     try:
+        resolver = _hit_resolver(group, root, repos)
         res = grep(store, pattern, regex=regex, ignore_case=ignore_case, path_glob=path_glob,
-                   limit=limit, files_only=files_only, max_bytes=GREP_MAX_RESPONSE_BYTES)
-        if res.get("status") == "ok":
-            resolver = _hit_resolver(group, root, repos)
-            for m in res.get("matches", []):
-                m.update(resolver.hit(m["path"], m["line"]))  # path becomes repo-relative, abs_path kept
-            if files_only:
-                res["file_hits"] = [
-                    {k: h[k] for k in ("repo", "path", "ref", "web_url")}
-                    for h in (resolver.hit(f) for f in res["files"])
-                ]
-            if clamped:
-                res["limit_clamped"] = clamped  # truncated stays whatever grep found: true only if cut
+                   limit=limit, files_only=files_only, max_bytes=GREP_MAX_RESPONSE_BYTES,
+                   hit_fn=resolver.hit)
+        if res.get("status") == "ok" and clamped:
+            res["limit_clamped"] = clamped  # truncated stays whatever grep found: true only if cut
         return res
     finally:
         store.close()

@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import json
 import logging
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
 MAX_FILE_BYTES = int(os.environ.get("CRG_CONTENT_MAX_BYTES", str(1_000_000)))
 MAX_LINE_CHARS = 300
+# FastMCP puts every result on the wire twice (a text block and structuredContent), so a byte budget
+# for the response has to count each item that many times.
+WIRE_COPIES = 2
 
 _SCHEMA = (
     'CREATE VIRTUAL TABLE IF NOT EXISTS file_content USING fts5(path UNINDEXED, body, tokenize="trigram")',
@@ -157,8 +161,15 @@ def grep(
     limit: int = 100,
     files_only: bool = False,
     max_bytes: int = 0,
+    hit_fn: Callable[[str, int | None], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """max_bytes > 0 bounds the response size (path + line text per hit); hitting it sets truncated."""
+    """Search the content index.
+
+    max_bytes > 0 bounds the response on the wire: every item is measured as it will be sent (enriched by
+    hit_fn, counted WIRE_COPIES times) and hitting the budget sets truncated.
+    hit_fn(abs_path, line) -> extra fields merged into each match (and, with files_only, one entry per
+    file in file_hits).
+    """
     conn = store._conn
     if not ensure_schema(conn):
         return {"status": "error", "error": "content index unavailable (SQLite trigram tokenizer missing)"}
@@ -180,8 +191,12 @@ def grep(
     else:
         rows = conn.execute("SELECT path, body FROM file_content")
 
+    def cost(obj: Any) -> int:
+        return WIRE_COPIES * (len(json.dumps(obj, ensure_ascii=False).encode()) + 2)
+
     matches: list[dict[str, Any]] = []
     files: list[str] = []
+    file_hits: list[dict[str, Any]] = []
     truncated = False
     used = 0
     for path, body in rows:
@@ -189,11 +204,18 @@ def grep(
             continue
         if files_only:
             if rx.search(body):
-                used += len(path)
-                if max_bytes and used > max_bytes and files:
+                entry = None
+                if hit_fn:
+                    h = hit_fn(path, None)
+                    entry = {k: h[k] for k in ("repo", "path", "ref", "web_url")}
+                size = cost(path) + (cost(entry) if entry else 0)
+                if max_bytes and used + size > max_bytes and files:
                     truncated = True
                     break
+                used += size
                 files.append(path)
+                if entry:
+                    file_hits.append(entry)
                 if len(files) >= limit:
                     truncated = True
                     break
@@ -201,13 +223,16 @@ def grep(
         hit = False
         for n, line in enumerate(body.splitlines(), 1):
             if rx.search(line):
-                text = line[:MAX_LINE_CHARS]
-                used += len(path) + len(text)
-                if max_bytes and used > max_bytes and matches:
+                item: dict[str, Any] = {"path": path, "line": n, "text": line[:MAX_LINE_CHARS]}
+                if hit_fn:
+                    item.update(hit_fn(path, n))  # path becomes repo-relative, abs_path kept
+                size = cost(item) + (0 if hit else cost(path))
+                if max_bytes and used + size > max_bytes and matches:
                     truncated = True
                     break
+                used += size
                 hit = True
-                matches.append({"path": path, "line": n, "text": text})
+                matches.append(item)
                 if len(matches) >= limit:
                     truncated = True
                     break
@@ -228,4 +253,6 @@ def grep(
     }
     if not files_only:
         result["matches"] = matches
+    elif hit_fn:
+        result["file_hits"] = file_hits
     return result

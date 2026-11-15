@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Optional
 
 from fastmcp import FastMCP
 from fastmcp.tools.tool import ToolResult
 
 from . import config as _config
+from .incremental import find_repo_root
 from .tools import (
     build_or_update_graph,
     get_impact_radius,
@@ -20,6 +22,7 @@ from .tools import (
 )
 
 _default_repo_root: str | None = None
+_transport = "stdio"
 
 
 def _flag_errors(result: dict[str, Any]) -> Any:
@@ -41,11 +44,11 @@ mcp = FastMCP(
 
 
 def _pick_group(group: str | None, repo_root: str | None) -> tuple[str | None, dict[str, Any] | None]:
-    """The group a call runs against, or an error result. An explicit group or repo_root wins; otherwise the
-    server's default group. Without one, a server with several groups must not fall back to its working
-    directory (in the container that is not a project and not writable)."""
+    """Choose a server group without overriding local stdio repo detection."""
     if group or repo_root or _default_repo_root:
         return group, None
+    if _transport == "stdio" and (find_repo_root() is not None or (Path.cwd() / ".code-rosetta").is_dir()):
+        return None, None
     default = _config.cfg.default_group
     if default:
         return default, None
@@ -56,6 +59,8 @@ def _pick_group(group: str | None, repo_root: str | None) -> tuple[str | None, d
             "error": f"No group given and this server has no default group. Pass group='<name>'. "
                      f"Available groups: {names}",
         }
+    if _transport == "http":
+        return None, {"status": "error", "error": "No groups configured. Run sync-gitlab before querying the server."}
     return None, None
 
 
@@ -75,9 +80,12 @@ def build_or_update_graph_tool(
         full_rebuild: If True, re-parse all files. Default: False (incremental).
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for incremental diff. Default: HEAD~1.
-        group: Named config group (e.g. 'mygroup'). Builds all repos in the group.
-               Takes precedence over repo_root.
+        group: Named config group. Optional: when omitted the server's default group is used
+            (ROSETTA_DEFAULT_GROUP, or the only configured group). Builds all repos in the group.
     """
+    group, err = _pick_group(group, repo_root)
+    if err:
+        return _flag_errors(err)
     return _flag_errors(build_or_update_graph(
         full_rebuild=full_rebuild,
         repo_root=repo_root or _default_repo_root,
@@ -368,8 +376,9 @@ def main(
     read_only: bool = False,
 ) -> None:
     """Run the MCP server (stdio by default, or streamable HTTP)."""
-    global _default_repo_root
+    global _default_repo_root, _transport
     _default_repo_root = repo_root
+    _transport = transport
     if read_only:
         # Shared server: the index is owned by sync-gitlab, clients must not rebuild it.
         mcp.remove_tool("build_or_update_graph_tool")

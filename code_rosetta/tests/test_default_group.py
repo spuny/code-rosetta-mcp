@@ -1,5 +1,4 @@
-"""An agent's first call has no `group`. It must reach the server's group, not the server's working directory
-(QA r2, finding 1: `Permission denied: '/app/.code-rosetta'`)."""
+"""Default-group routing must not change local repository selection."""
 
 import asyncio
 import json
@@ -9,6 +8,7 @@ from fastmcp import Client
 from ruamel.yaml import YAML
 
 from code_rosetta import config
+import code_rosetta.main as server
 from code_rosetta.main import mcp
 from code_rosetta.tests.test_hits import synced  # noqa: F401  (fixture: group "acme", two projects)
 
@@ -92,3 +92,54 @@ def test_the_tool_manual_says_group_is_optional(elsewhere):
     for name in ("grep_code_tool", "search_nodes_tool", "query_graph_tool", "list_graph_stats_tool"):
         text = tools[name].inputSchema["properties"]["group"]["description"]
         assert "ROSETTA_DEFAULT_GROUP" in text and "optional" in text.lower(), name
+
+
+@pytest.mark.parametrize("marker", [".git", ".code-rosetta"])
+def test_stdio_in_a_repo_keeps_using_the_local_repo(elsewhere, monkeypatch, marker):
+    root = elsewhere / "local"
+    root.mkdir()
+    (root / marker).mkdir()
+    monkeypatch.chdir(root)
+    r, body = _call("list_graph_stats_tool", {})
+    assert r.is_error is False
+    assert body["files_count"] == 0
+    assert (root / ".code-rosetta" / "graph.db").exists()
+
+
+def test_build_tool_uses_the_server_default(elsewhere, monkeypatch):
+    calls = []
+    monkeypatch.setattr(server, "build_or_update_graph", lambda **kwargs: calls.append(kwargs) or {"status": "ok"})
+    r, body = _call("build_or_update_graph_tool", {})
+    assert r.is_error is False and body["status"] == "ok"
+    assert calls[0]["group"] == "acme"
+
+
+def test_http_uses_the_default_group_even_when_started_in_a_repo(elsewhere, monkeypatch):
+    root = elsewhere / "local"
+    root.mkdir()
+    (root / ".git").mkdir()
+    monkeypatch.chdir(root)
+    monkeypatch.setattr(server, "_transport", "http", raising=False)
+    r, body = _call("grep_code_tool", {"pattern": "aws_s3_bucket"})
+    assert r.is_error is False and body["matches"]
+    assert not (root / ".code-rosetta").exists()
+
+
+def test_http_without_config_returns_a_setup_error(elsewhere, monkeypatch):
+    path = elsewhere / "data" / "config.yaml"
+    path.write_text("graphs: {}\n")
+    monkeypatch.setattr(server, "_transport", "http", raising=False)
+    r, body = _call("list_graph_stats_tool", {})
+    assert r.is_error is True
+    assert "sync-gitlab" in body["error"]
+    assert not (elsewhere / "app" / ".code-rosetta").exists()
+
+
+def test_explicit_repo_wins_over_the_server_default(elsewhere):
+    root = elsewhere / "local"
+    root.mkdir()
+    (root / ".git").mkdir()
+    r, body = _call("list_graph_stats_tool", {"repo_root": str(root)})
+    assert r.is_error is False
+    assert body["files_count"] == 0
+    assert (root / ".code-rosetta" / "graph.db").exists()

@@ -64,7 +64,7 @@ def _git(args: list[str], cwd: Path | None, env: dict) -> str:
     )
     if r.returncode != 0:
         raise RuntimeError(f"git {args[0]} failed: {r.stderr.strip()[-300:]}")
-    return r.stdout.strip()
+    return r.stdout if "-z" in args else r.stdout.strip()
 
 
 def mirror_project(project: dict, repos_dir: Path, env: dict) -> dict:
@@ -85,18 +85,19 @@ def mirror_project(project: dict, repos_dir: Path, env: dict) -> dict:
             dest.parent.mkdir(parents=True, exist_ok=True)
             _git(["clone", "--quiet", "--depth", "1", "--single-branch", "--branch", branch,
                   project["http_url_to_repo"], str(dest)], None, env)
-            out["action"] = "cloned"
+            out.update(action="cloned", head=_git(["rev-parse", "HEAD"], dest, env))
             return out
         old = _git(["rev-parse", "HEAD"], dest, env)
+        out.update(head=old, previous_head=old)
         _git(["remote", "set-url", "origin", project["http_url_to_repo"]], dest, env)
         _git(["fetch", "--quiet", "--depth", "1", "origin", branch], dest, env)
         new = _git(["rev-parse", "FETCH_HEAD"], dest, env)
         if new == old:
             out["action"] = "unchanged"
             return out
-        changed = _git(["diff", "--name-only", old, new], dest, env).splitlines()
+        changed = _git(["diff", "--no-renames", "--name-only", "-z", old, new], dest, env).split("\0")
         _git(["reset", "--quiet", "--hard", new], dest, env)
-        out.update(action="updated", changed=[c for c in changed if c])
+        out.update(action="updated", head=new, changed=[c for c in changed if c])
     except Exception as e:  # noqa: BLE001 -- one bad repo must not stop the sync
         out.update(action="failed", error=str(e))
     return out
@@ -110,14 +111,24 @@ def write_config(config_path: Path, group_name: str, db_path: Path, repos: list[
     tmp = config_path.with_suffix(".tmp")
     yaml = YAML()
     yaml.default_flow_style = False
+    data = yaml.load(config_path.read_text()) if config_path.exists() else None
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError("Config must contain a YAML mapping")
+    if data.get("graphs") is None:
+        data["graphs"] = {}
+    if not isinstance(data["graphs"], dict):
+        raise ValueError("Config graphs must contain a YAML mapping")
     group: dict = {"db": str(db_path), "repos": [str(r) for r in repos]}
     # Lets the server turn a hit into <project, path, GitLab link> without any extra environment.
     if repos_dir is not None:
         group["repos_dir"] = str(repos_dir)
     if gitlab_url:
         group["gitlab_url"] = gitlab_url.rstrip("/")
+    data["graphs"][group_name] = group
     with open(tmp, "w") as f:
-        yaml.dump({"graphs": {group_name: group}}, f)
+        yaml.dump(data, f)
     tmp.replace(config_path)
 
 
@@ -207,6 +218,10 @@ class _IndexGaps:
         return self.parseable(repo) or (content is not None and self.candidates(repo))
 
 
+def _indexed_head_key(repo_root: Path) -> str:
+    return f"gitlab_sync:indexed_head:{repo_root}"
+
+
 def sync(
     url: str, token: str, groups: list[str], repos_dir: Path, db_path: Path,
     group_name: str = "default", workers: int = 8, limit: int = 0,
@@ -239,24 +254,34 @@ def sync(
     removed = 0
     gaps = _IndexGaps()
     with GraphStore(db_path) as store:
-        # Look at the index BEFORE building. A clone left without graph or content rows (a sync killed
-        # after the clone, or between the graph and the content commit) must get a full build whatever
-        # git says: incremental_update only builds the graph for changed files, so an update on top of
-        # an empty index would leave it half-indexed.
         graph_before, content_before = index_counts(store, in_scope)
         reindexed = 0
+        built_heads: dict[Path, str] = {}
+        indexing_errors: set[Path] = set()
         for r in results:
+            if r["action"] in ("failed", "skipped"):
+                continue
             path = r["path"]
-            if r["action"] == "cloned":
-                full_build(path, store)
-            elif path in in_scope and (gaps.missing_graph(path, graph_before)
-                                       or gaps.missing_content(path, content_before)):
-                logger.warning("%s: index incomplete (graph %d, content %s), indexing now", path,
-                               graph_before[path], content_before[path] if content_before else "n/a")
-                full_build(path, store)
-                reindexed += 1
-            elif r["action"] == "updated":
-                incremental_update(path, store, changed_files=r["changed"])
+            key = _indexed_head_key(path)
+            indexed_head = store.get_metadata(key)
+            incomplete = (gaps.missing_graph(path, graph_before)
+                          or gaps.missing_content(path, content_before))
+            if r["action"] == "unchanged" and indexed_head == r["head"] and not incomplete:
+                continue
+            # Invalidate before any per-file commits so an interrupted build cannot look complete.
+            store.set_metadata(key, "")
+            if r["action"] == "updated" and indexed_head == r["previous_head"] and not incomplete:
+                result = incremental_update(path, store, changed_files=r["changed"])
+            else:
+                if r["action"] != "cloned":
+                    logger.warning("%s: index incomplete or commit not checkpointed, rebuilding", path)
+                    reindexed += 1
+                result = full_build(path, store)
+            if result.get("errors"):
+                indexing_errors.add(path)
+                logger.warning("%s: indexing reported %d error(s)", path, len(result["errors"]))
+            else:
+                built_heads[path] = r["head"]
 
         # Repos that were archived, deleted or moved out of scope.
         if not limit:
@@ -275,13 +300,17 @@ def sync(
 
         # Index health: every clone with something indexable must have its graph rows (if it has parseable
         # files) and its content rows (if it has searchable files).
-        failed_paths = {r["path"] for r in results if r["action"] == "failed"}
         graph_now, content_now = index_counts(store, in_scope)
-        expected = sorted(p for p in in_scope - failed_paths if gaps.indexable(p, graph_now, content_now))
-        missing = [p for p in expected if gaps.missing_graph(p, graph_now) or gaps.missing_content(p, content_now)]
+        expected = sorted(p for p in in_scope if gaps.indexable(p, graph_now, content_now))
+        missing = [p for p in expected if p in indexing_errors
+                   or gaps.missing_graph(p, graph_now) or gaps.missing_content(p, content_now)]
         for p in missing:
             logger.warning("%s: not indexed completely (graph %d, content %s)", p.relative_to(repos_dir), graph_now[p],
                            content_now[p] if content_now else "n/a")
+        # The checkpoint covers graph, content, cross-file links and FTS together.
+        for path, head in built_heads.items():
+            if path not in missing:
+                store.set_metadata(_indexed_head_key(path), head)
 
     write_config(_CONFIG_FILE, group_name, db_path, sorted(in_scope), repos_dir=repos_dir, gitlab_url=url)
 
@@ -293,7 +322,7 @@ def sync(
         "failed": counts.get("failed", 0),
         "indexed_repos": len(expected) - len(missing),
         "expected_repos": len(expected),
-        "ok": len(in_scope) > 0 and not missing,
+        "ok": len(in_scope) > 0 and not missing and not counts.get("failed", 0),
         "nodes": stats.total_nodes,
         "files": stats.files_count,
         "git_seconds": round(t_git, 1),

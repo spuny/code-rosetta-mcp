@@ -83,6 +83,28 @@ cd ~/projects/terraform-main
 code-rosetta build  # uses infra.db automatically
 ```
 
+### Shared HTTP server
+
+Local `code-rosetta serve` still defaults to stdio and uses the current repository.
+For a shared server, set `GITLAB_TOKEN` in the environment, then:
+
+```bash
+export CODE_ROSETTA_CONFIG="$HOME/.code-rosetta/shared/config.yaml"
+code-rosetta sync-gitlab --url https://gitlab.example --groups my-team \
+  --repos-dir "$HOME/.code-rosetta/shared/repos" \
+  --db "$HOME/.code-rosetta/shared/graph.db"
+code-rosetta serve --transport http --read-only
+```
+
+The MCP endpoint is `http://127.0.0.1:8000/mcp`. HTTP calls without a `group`
+use `ROSETTA_DEFAULT_GROUP`, then the config's `default_group`, then the only
+configured group. With several groups and no default, the error lists the choices.
+An explicit `group` or `repo_root` overrides automatic selection.
+
+Sync preserves unrelated configuration groups and settings. Failed fetches keep
+existing indexes but make the command exit nonzero. Interrupted builds are retried;
+existing indexes without commit checkpoints receive a one-time full rebuild.
+
 ### Claude Code integration
 
 ```bash

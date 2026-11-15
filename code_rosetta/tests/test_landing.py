@@ -50,17 +50,23 @@ def test_page_says_group_is_optional():
 
 
 def test_a_public_name_without_forwarded_proto_still_gets_https():
-    """Behind an ingress that does not send X-Forwarded-Proto the page used to print http:// (404 on copy-paste)."""
     html = _get(host="rosetta.example.com").text
     assert "claude mcp add --transport http rosetta https://rosetta.example.com/mcp" in html
     assert "http://rosetta.example.com" not in html
 
 
 def test_localhost_stays_plain_http():
-    for host in ("localhost:8000", "127.0.0.1:8000", "[::1]:8000"):
+    for host in ("localhost", "LOCALHOST:8000", "127.0.0.1:8000", "[::1]", "[::1]:8000"):
         assert f"http://{host}/mcp" in _get(host=host).text, host
 
 
 def test_forwarded_proto_is_honoured():
-    html = _get(**{"x-forwarded-proto": "http", "host": "rosetta.example.com"}).text
-    assert "http://rosetta.example.com/mcp" in html
+    for value, scheme in (("http", "http"), ("http, https", "http"), (" HTTPS , http", "https")):
+        html = _get(**{"x-forwarded-proto": value, "host": "rosetta.example.com"}).text
+        assert f"{scheme}://rosetta.example.com/mcp" in html
+
+
+def test_invalid_forwarded_proto_uses_the_safe_fallback():
+    for value in ("", "ftp", ", https"):
+        html = _get(**{"x-forwarded-proto": value, "host": "rosetta.example.com"}).text
+        assert "https://rosetta.example.com/mcp" in html

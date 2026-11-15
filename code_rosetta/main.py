@@ -348,13 +348,12 @@ plus a cross-language graph (who calls what, what references what). It speaks MC
 
 
 def _public_scheme(forwarded_proto: str | None, host: str, own_scheme: str) -> str:
-    """The scheme a client should type. A TLS-terminating proxy hides https from us, and a copy-pasted http://
-    line to a public name returns 404 (QA r2, finding 2), so https is the default; only a local address is
-    plain http."""
-    if forwarded_proto:
-        return forwarded_proto.split(",")[0].strip().lower()
+    """Prefer the proxy's scheme, falling back to HTTPS for non-local hosts."""
+    forwarded_scheme = (forwarded_proto or "").split(",")[0].strip().lower()
+    if forwarded_scheme in ("http", "https"):
+        return forwarded_scheme
     hostname = host.rsplit(":", 1)[0].strip("[]") if not host.endswith("]") else host.strip("[]")
-    if hostname in ("localhost", "127.0.0.1", "::1"):
+    if hostname.lower() in ("localhost", "127.0.0.1", "::1"):
         return own_scheme
     return "https"
 

@@ -1,0 +1,18 @@
+# synthetic application config
+name: demo-service
+replicas: 3
+debug: true
+ratio: 0.5
+nothing: ~
+database:
+  host: db.internal
+  port: 5432
+  password: hunter2
+endpoints:
+  - /health
+  - /ready
+api_token: abc123
+dsn: postgres://app:s3cret@db.internal/app
+motd: |
+  hello
+  world

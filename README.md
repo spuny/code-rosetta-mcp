@@ -1,343 +1,179 @@
 # Code Rosetta
 
-Cross-language codebase graph for LLM agents. Python, Terraform/HCL, YAML, Jinja2 — one unified, queryable map.
+A cross-language code graph and search tool for coding agents, written in Rust.
+Parse Python, Terraform/HCL, YAML, Jinja2, Dockerfile, Bash and Go templates (Helm)
+into one graph, then query names, source text, references and change impact.
 
-**The problem:** LLM coding agents re-read your entire codebase every session. Existing tools like [code-review-graph](https://github.com/tirth8205/code-review-graph) and [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) handle Python/JS/Go well, but if your stack includes Terraform, YAML configs, and Jinja2 templates — they're blind to most of your code.
+This branch introduces the **2.0 alpha Rust implementation**. It has no
+Sourcebot/Saucebot UI or compatibility API. The previous Python source remains in
+`code_rosetta/`; existing Python releases and tags are unchanged.
 
-**Code Rosetta** parses all four languages into a single knowledge graph with cross-language and cross-repo reference detection. Change a Terraform variable and see which YAML configs, Python scripts, and Jinja templates are affected — across repository boundaries.
+## Build
 
-## What it does
+The Rust 1.98.1 toolchain is pinned in `rust-toolchain.toml`. Git is required for
+repository discovery, indexing and GitLab synchronization. SQLite is bundled. Local
+SQLite use requires neither a database service nor GitLab credentials.
 
-- **4 language parsers** with a pluggable architecture (add new languages by writing one file)
-- **Cross-language edges** — detects Python reading YAML configs, rendering Jinja2 templates, Terraform referencing YAML files
-- **Cross-repo blast radius** — indexes multiple repos into one graph, resolves `terraform_remote_state` output references between repos
-- **Weighted impact analysis** — structural edges (CONTAINS) don't fan out, only real dependency edges propagate
-- **MCP server** for Claude Code integration — query the graph during sessions without reading files
-- **Config groups** — organize repos into named groups with separate databases
-
-## Supported languages
-
-| Language | Parser | Node types |
-|---|---|---|
-| **Python** | tree-sitter | Module, Class, Function, Method, Import |
-| **Terraform/HCL** | python-hcl2 | Resource, DataSource, Module, Variable, Output, Provider, Local |
-| **YAML** | ruamel.yaml | Document, Section, K8sResource, Anchor |
-| **Jinja2** | jinja2 AST | Template, Block, Macro, Variable, Extends, Include |
-
-## Quick start
-
-### Install
-
-```bash
-# Requires Python 3.10+ and uv
-uv tool install code-rosetta-mcp
-
-# Or with pip
-pip install code-rosetta-mcp
+```sh
+cargo build --release --locked
+./target/release/rosetta --help
 ```
 
-### Single repo
+## Local quick start
 
-```bash
-cd /path/to/your/repo
-code-rosetta build
-code-rosetta status
+```sh
+# Run inside your project. Stores its index in .code-rosetta/rust.db.
+rosetta index --path . --name my-project
+rosetta search handler
+rosetta grep DATABASE_URL
+rosetta query callers_of 'my-project/app.py::Function::handler'
+rosetta impact --files my-project/app.py
+rosetta review-context --files my-project/app.py
+rosetta stats
+rosetta serve                         # MCP over stdio; logs go to stderr
 ```
 
-### Multi-repo with config groups
+In a Git working tree, indexing uses tracked working-tree files, not untracked
+files or just the committed revision. For a plain directory, Rosetta walks regular
+files. Re-index to pick up changes; unchanged content reuses its parsed result,
+renames/deletions replace the previous repository generation, and publication is
+transactional. Git discovery failures abort indexing rather than falling back to
+reading untracked/ignored files. Credential-directory roots and the entire home
+directory are refused. If another indexer publishes the same repository while it
+is being scanned, retry rather than overwrite its generation. Query commands read storage
+directly and do not require an HTTP server.
 
-```bash
-# Create config
-code-rosetta init
+You can index multiple repositories into the same database using distinct names.
+Names and paths must produce unique `<repo>/<path>` identities; conflicting
+combinations are rejected transactionally. Paths containing `::` are reserved for
+symbol identifiers and rejected. Use one explicit database path when indexing from different working directories:
 
-# Edit ~/.code-rosetta/config.yaml
+```sh
+rosetta --database /absolute/path/graph.db index --path /src/backend --name team/backend
+rosetta --database /absolute/path/graph.db index --path /src/infra --name team/infra
+rosetta --database /absolute/path/graph.db serve
 ```
 
-```yaml
-default_db: ~/.code-rosetta/graph.db
+## Choose transport and storage independently
 
-graphs:
-  my-infra:
-    db: ~/.code-rosetta/infra.db
-    repos:
-      - ~/projects/terraform-main
-      - ~/projects/terraform-users
-      - ~/projects/k8s-configs
+- **Stdio:** SQLite is the default and normal local choice. PostgreSQL also works.
+- **HTTP:** PostgreSQL is recommended for shared deployments. SQLite remains
+  supported for local/small single-instance use.
+- Choosing a transport never changes your database choice. No configuration means
+  SQLite, including with HTTP. PostgreSQL is always an explicit selection.
 
-  my-app:
-    db: ~/.code-rosetta/app.db
-    repos:
-      - ~/projects/backend
-      - ~/projects/frontend
+All four combinations:
+
+```sh
+rosetta --storage sqlite --database /data/graph.db serve --transport stdio
+rosetta --storage sqlite --database /data/graph.db serve --transport http
+
+# Keep credentials out of shell history and process arguments.
+export ROSETTA_STORAGE=postgres
+export ROSETTA_DATABASE='postgres://rosetta:YOUR_PASSWORD@localhost:5432/rosetta?sslmode=require'
+rosetta serve --transport stdio
+rosetta serve --transport http
 ```
 
-```bash
-# Build entire group into one graph
-code-rosetta build-group my-infra
-
-# List groups
-code-rosetta groups
-
-# Single repo build auto-detects its group
-cd ~/projects/terraform-main
-code-rosetta build  # uses infra.db automatically
-```
-
-### Shared HTTP server
-
-Local `code-rosetta serve` still defaults to stdio and uses the current repository.
-For a shared server, set `GITLAB_TOKEN` in the environment, then:
-
-```bash
-export CODE_ROSETTA_CONFIG="$HOME/.code-rosetta/shared/config.yaml"
-code-rosetta sync-gitlab --url https://gitlab.example --groups my-team \
-  --repos-dir "$HOME/.code-rosetta/shared/repos" \
-  --db "$HOME/.code-rosetta/shared/graph.db"
-code-rosetta serve --transport http --read-only
-```
-
-The MCP endpoint is `http://127.0.0.1:8000/mcp`. HTTP calls without a `group`
-use `ROSETTA_DEFAULT_GROUP`, then the config's `default_group`, then the only
-configured group. With several groups and no default, the error lists the choices.
-An explicit `group` or `repo_root` overrides automatic selection.
-
-Sync preserves unrelated configuration groups and settings. Failed fetches keep
-existing indexes but make the command exit nonzero. Interrupted builds are retried;
-existing indexes without commit checkpoints receive a one-time full rebuild.
-
-### Claude Code integration
-
-```bash
-cd /path/to/your/repo
-code-rosetta install   # creates .mcp.json
-code-rosetta build     # build the graph
-# Restart Claude Code to pick up the MCP server
-```
-
-## CLI commands
-
-| Command | Description |
-|---|---|
-| `code-rosetta init` | Create config file at `~/.code-rosetta/config.yaml` |
-| `code-rosetta install` | Set up `.mcp.json` for Claude Code MCP integration |
-| `code-rosetta build` | Full graph build -- parse all files |
-| `code-rosetta build-group <name>` | Build all repos in a config group |
-| `code-rosetta update` | Incremental update -- only changed files |
-| `code-rosetta status` | Show graph statistics |
-| `code-rosetta groups` | List configured graph groups |
-| `code-rosetta search <query>` | FTS5 ranked search with camelCase/snake_case support |
-| `code-rosetta grep <pattern>` | Full-text / regex (`-E`) search over every tracked text file, any language |
-| `code-rosetta query <pattern> <target>` | Graph queries (callers_of, callees_of, imports_of, ...) |
-| `code-rosetta review-context` | Generate review context for changed files |
-| `code-rosetta viz` | Interactive D3.js graph visualization |
-| `code-rosetta rebuild-fts` | Rebuild the full-text search index |
-| `code-rosetta serve` | Start MCP server (stdio transport) |
-
-All commands accept `--repo` to specify the repository root and `--db` to override the database path.
-
-### Search
-
-FTS5-powered ranked search with BM25 scoring. Handles camelCase, snake_case, and prefix matching.
-Also searches nested YAML spec keys -- `priorityClassName`, `containerPort`, etc.
-
-```bash
-code-rosetta search "collector" -g mygroup
-code-rosetta search "priorityClassName" -g mygroup
-code-rosetta search "OrderLoader" -g mygroup --kind Class
-code-rosetta search "deploy" -g mygroup --language python -n 50
-```
-
-### Graph queries
-
-```bash
-code-rosetta query callers_of "path::ClassName" --group mygroup
-code-rosetta query callees_of "path::function_name" --group mygroup
-code-rosetta query imports_of "path/to/file.py" --group mygroup
-code-rosetta query references_to "resource.name" --group mygroup
-code-rosetta query cross_language --group mygroup
-```
-
-### Review context
-
-```bash
-code-rosetta review-context --group mygroup --base HEAD~3
-code-rosetta review-context --group mygroup --files "path/a.tf,path/b.py"
-```
-
-### Visualization
-
-Generates a self-contained HTML file with an interactive D3.js force-directed graph.
-
-```bash
-# Neighborhood of a specific node
-code-rosetta viz -g mygroup -t "path::ClassName" -d 2
-
-# Impact radius of changed files
-code-rosetta viz -g mygroup -f "path/a.py,path/b.tf"
-
-# Overview of most-connected hubs
-code-rosetta viz -g mygroup
-
-# Save to specific file without opening browser
-code-rosetta viz -g mygroup -t "path::ClassName" -o graph.html --no-open
-```
+[`docs/storage.md`](docs/storage.md) covers configuration, deployment limits and
+backup. [`docs/mcp.md`](docs/mcp.md) has client examples and HTTP security guidance.
 
 ## MCP tools
 
-When running as an MCP server, the following tools are available:
+Both transports expose the same six read-only tools:
 
-| Tool | Description |
-|---|---|
-| `build_or_update_graph_tool` | Build or incrementally update the graph |
-| `get_impact_radius_tool` | Blast radius analysis for changed files |
-| `query_graph_tool` | Predefined graph queries (callers, callees, imports, references, cross-language) |
-| `search_nodes_tool` | FTS5 ranked search by name, kind, language, or YAML spec keys |
-| `grep_code_tool` | Full-text / regex search over file contents (literals, env vars, image names, URLs) |
-| `list_graph_stats_tool` | Graph statistics |
-| `get_review_context_tool` | Token-efficient review context with source snippets |
+- `search_nodes`: tokenized node-name/YAML-key search; optional kind/language/repo filters.
+- `grep_code`: literal or regex source search; repository/file globs and files-only mode.
+- `query_graph`: callers, callees, imports, children, tests, inheritance, references,
+  file summaries and cross-language edges.
+- `get_impact_radius`: bounded dependency traversal; structural `CONTAINS` edges do
+  not fan out to unrelated siblings.
+- `get_review_context`: impact plus bounded source snippets and optional caller-supplied text.
+- `list_graph_stats`: repository, file, node, edge and language counts.
 
-**Note:** `search_nodes_tool` uses the same FTS5 engine as the CLI `search` command -- BM25 ranking, camelCase/snake_case tokenization, and YAML keyword search all work through MCP. Visualization (`viz`) and FTS index management (`rebuild-fts`) are CLI-only.
+Repository filters are globs: `*` stays in one path segment and `**` crosses
+segments. Use qualified targets such as `team/backend/app.py::Function::handler`
+when a bare name is ambiguous. Files are addressed as `<repo>/<path>`.
 
-**Names vs text:** `search` / `search_nodes_tool` match node names and YAML keys only -- a string inside a value, comment or unparsed file returns nothing there. Use `grep` / `grep_code_tool` for text. The content index (SQLite FTS5 trigram, files up to 1 MB, binaries skipped) is refreshed on every build and skips unchanged files by hash.
+## HTTP
 
-### Query patterns
-
-The `query_graph_tool` supports these patterns:
-
-- `callers_of` — functions that call the target
-- `callees_of` — functions called by the target
-- `imports_of` / `importers_of` — import relationships
-- `children_of` — nodes contained in a file or class
-- `tests_for` — tests for a function or class
-- `inheritors_of` — classes inheriting from the target
-- `file_summary` — all nodes in a file
-- `references_to` — all references to a resource/variable/module
-- `cross_language` — all cross-language edges in the graph
-
-## Edge types
-
-### Within a language
-
-| Edge | Meaning |
-|---|---|
-| `CONTAINS` | File/class contains a symbol (structural, not traversed in blast radius) |
-| `CALLS` | Function/method calls another |
-| `IMPORTS` | Module imports another |
-| `INHERITS` | Class inherits from another |
-| `REFERENCES` | Terraform resource references another (via interpolation) |
-| `PASSES_VAR` | Terraform module passes a variable |
-| `USES_MODULE` | Terraform module uses a local source path |
-| `EXTENDS` / `INCLUDES` | Jinja2 template relationships |
-| `USES_VARIABLE` / `CALLS_MACRO` | Jinja2 variable and macro usage |
-
-### Cross-language (detected automatically)
-
-| Edge | Meaning |
-|---|---|
-| `READS_CONFIG` | Python/Terraform reads a YAML config file |
-| `RENDERS` | Python/Terraform renders a Jinja2 template |
-| `REMOTE_STATE` | Terraform `terraform_remote_state` references outputs from another repo |
-
-## How blast radius works
-
-When you change a file, Code Rosetta traces the impact through the graph using BFS with **edge weighting**:
-
-- **Strong edges** (CALLS, IMPORTS, REFERENCES, REMOTE_STATE, etc.) are always traversed — these represent real data/code dependencies
-- **Structural edges** (CONTAINS) are only used for seeding — finding nodes in the changed file — but never for fan-out during traversal
-
-This prevents a change in `main.tf` from falsely impacting every resource in the repo just because they're all contained in files referenced by `main.tf`.
-
-## Changelog
-
-### 1.2.0 (2026-05-20)
-
-**Import-aware call resolution + INHERITS + cross-language edges**
-
-- **Python call resolution** -- `_FileScope` tracks imports and local definitions during parsing. `self.method()`, imported names, module-aliased calls all resolve to graph-qualified targets. Post-build pass maps module paths to file paths for cross-file resolution. CALLS: 0.03% -> 13.4% resolved.
-- **INHERITS resolution** -- same scope-based resolution. 0% -> 55.7% resolved.
-- **Cross-language edges** -- Go template `.Values` references resolve to `values.yaml` Section nodes (87.2%). Template include/template calls resolve to Template nodes (45 edges). 34 cross-language edges now connect gotemplate -> yaml.
-- **Post-build `resolve_cross_file_calls()`** runs automatically after `build-group`.
-
-### 1.1.0 (2026-05-20)
-
-**3 new language parsers + FTS5 search + visualization**
-
-- **Dockerfile parser** -- extracts FROM stages, COPY sources, EXPOSE ports, ENTRYPOINT. Multi-stage DEPENDS_ON edges. Handles files named `Dockerfile` (no extension).
-- **Bash/Shell parser** -- extracts functions, exported variables, source/. imports, function calls. Supports `.sh` and `.bash`.
-- **Go template parser (Helm)** -- extracts template definitions, include/template calls, `.Values.*` references. Routes `.yaml` files in `templates/` dirs automatically.
-- **FTS5 ranked search** -- BM25 scoring, camelCase/snake_case tokenization, prefix matching. Searches nested YAML spec keys (e.g. `priorityClassName`). Falls back to LIKE if FTS5 is unavailable.
-- **Graph queries via CLI** -- `callers_of`, `callees_of`, `imports_of`, `importers_of`, `children_of`, `tests_for`, `inheritors_of`, `file_summary`, `references_to`, `cross_language`.
-- **Review context** -- generates impact-aware review context for changed files.
-- **Interactive visualization** -- self-contained HTML with D3.js force-directed graph. Dark theme, color-coded nodes/edges, click-to-highlight, search filter, zoom/drag.
-- **Filename-based parser registry** -- parsers can register filename patterns (e.g. `Dockerfile`) in addition to extensions.
-- **File-content detectors** -- parsers can register detector functions that override extension-based routing.
-
-### 1.0.0
-
-Initial release. Parsers for Python, Terraform/HCL, YAML, Jinja2. SQLite + NetworkX graph. MCP server. Incremental builds. Cross-language edge detection.
-
-## Architecture
-
-```
-code_rosetta/
-  parsers/
-    __init__.py       # Plugin registry + LanguageParser protocol
-    python_parser.py  # tree-sitter
-    hcl_parser.py     # python-hcl2
-    yaml_parser.py    # ruamel.yaml
-    jinja_parser.py   # jinja2 AST
-  models.py           # NodeInfo, EdgeInfo — the parser contract
-  graph.py            # SQLite-backed graph store + NetworkX traversal
-  crossref.py         # Cross-language + cross-repo reference detection
-  incremental.py      # Full/incremental build, file hashing, git integration
-  config.py           # ~/.code-rosetta/config.yaml management
-  tools.py            # MCP tool implementations
-  main.py             # FastMCP server
-  cli.py              # Click CLI
+```sh
+rosetta serve --transport http --listen 127.0.0.1:3000
 ```
 
-### Adding a new language
+- MCP Streamable HTTP: `/mcp`.
+- Native JSON tool calls: `POST /api/v1/tools/<tool-name>`.
+- Stats: `GET /api/v1/stats`; storage health: `GET /healthz`.
+- No browser UI, Sourcebot-compatible routes, or built-in user accounts.
 
-1. Create `code_rosetta/parsers/my_parser.py`
-2. Implement the `LanguageParser` protocol:
+**There is no authentication in Rosetta.** Whoever reaches the service can query
+its entire index. Bind to loopback, or put an authenticated TLS proxy in front of
+it. Non-loopback binding requires `--allow-remote`. Configure `--allowed-host` and
+`--allowed-origin` for your deployment; Host/Origin checks are not authentication.
 
-```python
-class MyParser:
-    language = "mylang"
-    extensions = [".ml"]
+## Optional GitLab synchronization
 
-    def parse(self, file_path: Path, source: bytes) -> tuple[list[NodeInfo], list[EdgeInfo]]:
-        # Parse source, return nodes and edges
-        ...
-
-my_parser = MyParser()
+```sh
+# Set GITLAB_TOKEN securely in the environment (read_api and repository-read access).
+rosetta sync --url https://gitlab.example.com --group my-team \
+  --repos-dir /data/rosetta-repos
 ```
 
-3. Register it in `cli.py`:
+Synchronizes the group and its subgroups once, using default-branch shallow clones.
+Tokens are passed through headers/environment, not saved in clone URLs or CLI
+arguments. Dirty or mismatched checkouts are not overwritten. Failed fetches leave
+the old index intact and cause a nonzero exit. Schedule this command externally
+for periodic refresh. Projects absent from a listing are not automatically deleted;
+use `rosetta remove team/project` when appropriate.
 
-```python
-from .parsers.my_parser import my_parser
-register_parser(my_parser)
+## Data and security
+
+Rosetta stores source code in its database and materializes the indexed graph and
+text in each serving process's memory. PostgreSQL provides shared durable storage;
+it does not make the in-memory query engine distributed. Processes refresh their
+snapshot after another indexer publishes a generation.
+
+Credential directories (`.ssh`, `.kube`, `.aws`, `.gnupg`) and credential-like
+filenames (`.env`, standard SSH private-key names, `.git-credentials`, Docker's
+`.docker/config.json`, kubeconfigs and Terraform state), symlinks, binaries and
+files over 1 MB have no stored content. Credential content from older Rust alpha
+indexes is also withheld when loaded; re-index or remove those repositories to
+remove previously persisted plaintext.
+Vendored/generated directories and lockfiles are excluded. **This is not a secret
+scanner:** credentials committed in ordinary source files can still be indexed and
+returned by search or review snippets. Protect database files, clones, backups and
+HTTP access accordingly. Plain-directory traversal does not apply `.gitignore`.
+
+## Tests
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo build --locked
+python3 tests/transport_matrix.py
+python3 scripts/audit_public.py
+python3 scripts/license_bundle.py target/third-party
 ```
 
-That's it. The graph store, incremental updates, MCP tools, and blast radius analysis all pick up new languages automatically.
+The default tests exercise SQLite; the explicitly ignored PostgreSQL contract
+requires a disposable test database. To run the complete storage/transport matrix:
 
-## Storage
+```sh
+export ROSETTA_TEST_POSTGRES_URL='postgres://rosetta:test-only@127.0.0.1:5432/rosetta_test?sslmode=disable'
+cargo test -p rosetta --test storage_graph --locked -- --ignored
+python3 tests/transport_matrix.py
+```
 
-- Graph database: SQLite with WAL mode, stored in `.code-rosetta/graph.db` (per-repo) or `~/.code-rosetta/<group>.db` (per-group)
-- All data is local — no cloud, no external services
-- Incremental updates use SHA-256 file hashing — only changed files are re-parsed
+Never point these tests at production data. The contract tests create and remove
+synthetic indexed repositories. Public CI runs both stores and both transports.
 
-## Known Limitations
+## Migration and licensing
 
-- **Go templates (Helm)**: YAML files containing Go template directives (`{{ }}`, `{{- range }}`, etc.) are not parsed. A dedicated Go template parser is planned — it will extract template structure, `.Values` references, `include`/`template` cross-file edges, and static k8s resource metadata. See `feat/go-template-parser` branch.
-- **Module output pass-through**: Terraform module-to-module output references within a single repo are not yet tracked as edges.
-- **Cross-repo object references**: Beyond `terraform_remote_state`, references like infra.git pointing at cluster resources require both repos in the same named group + parser support for the reference pattern.
+- [`docs/migration.md`](docs/migration.md): Python-to-Rust changes and re-indexing.
+- [`THIRD_PARTY.md`](THIRD_PARTY.md): source provenance and third-party notices.
+- [`docs/public-rust-plan.md`](docs/public-rust-plan.md): the agreed scope and acceptance checks.
 
-## Credits
-
-Graph store and incremental update logic adapted from [code-review-graph](https://github.com/tirth8205/code-review-graph) (MIT license). Parser architecture, cross-language detection, multi-repo support, config groups, and edge weighting are original.
-
-## License
-
-MIT
+Rosetta's original code and Rust implementation are MIT licensed; see [`LICENSE`](LICENSE).
+Third-party dependencies retain their own licenses. The Rust MCP transport uses
+`rmcp`, the official Rust MCP SDK, rather than Sourcebot/Saucebot transport code.

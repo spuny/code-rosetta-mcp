@@ -1,0 +1,31 @@
+{% extends "layouts/base.html" %}
+{% import "macros/forms.j2" as forms %}
+{% from "macros/ui.j2" import button, icon as ico with context %}
+{% include "partials/header.j2" %}
+{% include ["a.j2", "b.j2"] ignore missing %}
+{% include template_name %}
+{% macro field(name, value=default_value, label=none) -%}
+  <label>{{ label or name }}</label>
+  {{ forms.input(name, value) }}
+{%- endmacro %}
+{% macro wrapper(x) %}{{ field(x) }}{{ caller() }}{% endmacro %}
+{% set title = page.title | default(site_name) %}
+{% set ns = namespace(count=0) %}
+{% set ns.count = ns.count + 1 %}
+{% block content scoped %}
+  {% for item in items if item.visible %}
+    {{ loop.index }} {{ item.name }} {{ prefix ~ item.name }} {{ ico() }}
+    {{ field(item.name) }}
+  {% else %}
+    {{ empty_message }}
+  {% endfor %}
+  {% with a=outer_var, b=2 %}{{ a }}{{ b }}{{ c }}{% endwith %}
+  {% call wrapper(user) %}inner{% endcall %}
+  {% call(x) wrapper(thing) %}{{ x }}{% endcall %}
+  {{ button("ok", style=btn_style) }}
+{% endblock content %}
+{% raw %}{{ not_a_var }}{% endraw %}
+{# {{ commented }} #}
+{{ user is defined and user.name is not none }}
+{{ count|round(precision) }} {{ range(3) }}
+{{ title }}

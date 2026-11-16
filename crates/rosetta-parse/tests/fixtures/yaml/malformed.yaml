@@ -1,0 +1,6 @@
+---
+first: ok
+count: 1
+---
+broken: [1, 2
+other: }

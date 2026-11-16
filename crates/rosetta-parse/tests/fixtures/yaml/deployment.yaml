@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: shop
+  labels:
+    app: web
+    team: storefront
+    secret-token: nope
+spec:
+  replicas: 2
+  template:
+    spec:
+      serviceAccountName: web-sa
+      initContainers:
+        - name: migrate
+          image: registry.local/shop/migrate:1.2
+          envFrom:
+            - configMapRef:
+                name: migrate-config
+      containers:
+        - name: web
+          image: registry.local/shop/web:2.0
+          envFrom:
+            - configMapRef:
+                name: web-config
+            - secretRef:
+                name: web-secrets
+          env:
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: user
+            - name: MODE
+              valueFrom:
+                configMapKeyRef:
+                  name: web-mode
+                  key: mode
+            - name: PLAIN
+              value: literal
+      volumes:
+        - name: conf
+          configMap:
+            name: web-files
+        - name: certs
+          secret:
+            secretName: web-tls
+        - name: data
+          persistentVolumeClaim:
+            claimName: web-data
+        - name: both
+          projected:
+            sources:
+              - configMap:
+                  name: projected-cm
+              - secret:
+                  name: projected-secret

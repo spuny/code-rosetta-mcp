@@ -1,0 +1,6 @@
+replicaCount: 1
+image:
+  repository: registry.local/app
+  tag: latest
+service:
+  type: ClusterIP

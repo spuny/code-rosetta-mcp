@@ -1,0 +1,20 @@
+[package]
+name = "rosetta-parse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rosetta-model = { path = "../rosetta-model" }
+serde_json = { version = "1", features = ["preserve_order"] }
+regex = "1"
+memchr = "2"
+tree-sitter = "0.25"
+tree-sitter-python = "0.25"
+tree-sitter-bash = "0.25"
+hcl-edit = "=0.10.0"
+saphyr-parser = "=0.3.4"
+
+[dev-dependencies]

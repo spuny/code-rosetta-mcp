@@ -1,0 +1,23 @@
+[workspace]
+members = ["crates/rosetta-model", "crates/rosetta-parse", "crates/rosetta"]
+resolver = "2"
+
+[workspace.package]
+version = "2.0.0-alpha.1"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+publish = false
+
+[profile.dev.package.hcl-edit]
+opt-level = 3
+[profile.dev.package.winnow]
+opt-level = 3
+[profile.dev.package.saphyr-parser]
+opt-level = 3
+[profile.dev.package.tree-sitter]
+opt-level = 3
+[profile.dev.package.tree-sitter-python]
+opt-level = 3
+[profile.dev.package.tree-sitter-bash]
+opt-level = 3

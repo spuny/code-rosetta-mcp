@@ -1,0 +1,12 @@
+---
+# first document
+service: alpha
+port: 80
+---
+---
+service: beta
+port: 81
+...
+---
+- just
+- a list

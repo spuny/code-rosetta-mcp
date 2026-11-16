@@ -1,7 +1,8 @@
 # Public Rust Rosetta plan
 
-Status: agreed target design, not implemented in this public repository. The current
-public implementation is Python. Commands below illustrate the proposed Rust interface.
+Status: implemented as a Rust 2.0 alpha on the public feature branch, pending
+review and publication. The Python sources/releases are retained for migration.
+Commands below describe the Rust interface.
 
 ## Goal
 
@@ -43,17 +44,18 @@ An explicit storage choice must never be silently overridden by the transport.
   Document write contention, file permissions and the supported deployment model.
 - Stdio with PostgreSQL remains supported for users who prefer a managed database.
 - Add a storage boundary shared by indexing, graph queries and content search.
-  Implement SQLite support; the existing Rust implementation currently uses PostgreSQL.
-- Maintain backend-specific migrations and test equivalent graph/search behavior,
-  transactional index publication and recovery. Do not assume SQL or search-index
-  implementations are interchangeable.
+  SQLite support is implemented alongside PostgreSQL; the original internal Rust
+  implementation was PostgreSQL-only.
+- Version the public schema with backend-specific connection, locking and transaction
+  setup; test equivalent graph/search behavior, transactional index publication and
+  recovery. Do not assume SQL or search-index implementations are interchangeable.
 - Document backend configuration, database-file locations, connection URLs,
   backup/restore and concurrency limitations. Do not promise automatic conversion
   of existing Python indexes or migration between storage backends.
 
 ### MCP transports
 
-Proposed interface:
+Interface:
 
 ```sh
 rosetta serve --transport stdio

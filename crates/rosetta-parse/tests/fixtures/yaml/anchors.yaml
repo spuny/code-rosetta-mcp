@@ -1,0 +1,13 @@
+defaults: &defaults
+  adapter: postgres
+  host: localhost
+development:
+  <<: *defaults
+  database: dev
+test:
+  settings: *defaults
+tags:
+  - &first one
+  - two
+  - *first
+note: !!str &typed text

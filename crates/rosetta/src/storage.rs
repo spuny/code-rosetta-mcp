@@ -2,7 +2,11 @@ use anyhow::{Context, Result, bail};
 use rosetta_model::ParsedFile;
 use serde::{Deserialize, Serialize};
 use sqlx::{AnyPool, Row, any::AnyPoolOptions};
-use std::{collections::BTreeMap, path::Path, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::Path,
+    time::Duration,
+};
 
 const VERSION: i64 = 1;
 
@@ -30,6 +34,31 @@ pub struct Repository {
 pub struct Snapshot {
     pub revision: i64,
     pub repositories: BTreeMap<String, Repository>,
+}
+
+fn insert_identity(identities: &mut HashSet<String>, repo: &str, path: &str) -> Result<()> {
+    if repo.contains("::") || path.contains("::") {
+        bail!("indexed paths must not contain the reserved symbol delimiter ::");
+    }
+    if !identities.insert(format!("{repo}/{path}")) {
+        bail!("indexed file identity collision; choose a different repository name");
+    }
+    Ok(())
+}
+
+fn withhold_credentials(repo: &mut Repository) {
+    let credential_root = crate::policy::credential_directory(&repo.root);
+    for (path, file) in &mut repo.files {
+        if credential_root
+            || crate::policy::credential_path(path)
+            || crate::policy::credential_path(&format!("{}/{path}", repo.root))
+        {
+            file.hash.clear();
+            file.text = None;
+            file.parsed = None;
+            file.skipped = Some("credential path".into());
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -154,6 +183,13 @@ impl Storage {
                 .files
                 .insert(path, file);
         }
+        let mut identities = HashSet::new();
+        for repo in repositories.values_mut() {
+            for path in repo.files.keys() {
+                insert_identity(&mut identities, &repo.name, path)?;
+            }
+            withhold_credentials(repo);
+        }
         tx.commit().await?;
         Ok(Snapshot {
             revision,
@@ -174,6 +210,18 @@ impl Storage {
         if generation.unwrap_or(0) != expected_generation {
             bail!("repository changed during indexing; retry the index command");
         }
+        let mut identities = HashSet::new();
+        for path in repo.files.keys() {
+            insert_identity(&mut identities, &repo.name, path)?;
+        }
+        for row in sqlx::query("SELECT repo, path FROM rosetta_files WHERE repo <> $1")
+            .bind(&repo.name)
+            .fetch_all(&mut *tx)
+            .await?
+        {
+            insert_identity(&mut identities, row.try_get(0)?, row.try_get(1)?)?;
+        }
+        withhold_credentials(&mut repo);
         repo.generation = expected_generation + 1;
         let payload = serde_json::to_string(&repo)?;
         sqlx::query("INSERT INTO rosetta_repositories (name, generation, payload) VALUES ($1, $2, $3) ON CONFLICT (name) DO UPDATE SET generation=excluded.generation, payload=excluded.payload")

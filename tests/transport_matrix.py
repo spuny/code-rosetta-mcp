@@ -21,6 +21,8 @@ REQUESTS = [
     ("get_impact_radius", {"changed_files": ["fixture/core.py"]}),
     ("get_review_context", {"changed_files": ["fixture/core.py"]}),
     ("list_graph_stats", {}),
+    ("grep_code", {"pattern": "sensitive-boundary-marker"}),
+    ("get_review_context", {"changed_files": ["fixture/.kube/config"]}),
     ("grep_code", {"pattern": "[", "regex": True}),
     ("search_nodes", {"query": "x", "limit": 0}),
 ]
@@ -167,7 +169,11 @@ def main():
         fixture.mkdir()
         (fixture / "core.py").write_text("def helper():\n    return 'fixture-marker'\n")
         (fixture / "app.py").write_text("from core import helper\ndef run():\n    return helper()\n")
-        (fixture / ".env").write_text("SECRET=hidden-fixture\n")
+        (fixture / ".env").write_text("SECRET=sensitive-boundary-marker\n")
+        for name in [".kube/config", ".ssh/id_ecdsa", ".git-credentials"]:
+            path = fixture / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("sensitive-boundary-marker\n")
         backends = [("sqlite", str(root / "graph.db"))]
         if POSTGRES:
             backends.append(("postgres", POSTGRES))
@@ -177,6 +183,8 @@ def main():
             for transport in [stdio, http]:
                 actual = transport(args)
                 assert actual[-1]["isError"] and actual[-2]["isError"]
+                assert actual[6]["value"]["matches"] == []
+                assert actual[7]["value"]["context"]["source_snippets"]["fixture/.kube/config"] == "(content withheld by file policy)"
                 if baseline is None:
                     baseline = actual
                 else:

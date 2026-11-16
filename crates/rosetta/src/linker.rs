@@ -118,7 +118,7 @@ pub fn resolve(graph: &mut Graph) {
             target = single(
                 indexes
                     .values()
-                    .filter_map(|i| i.resolve_tfstate(value))
+                    .flat_map(|i| i.tfstate_candidates(value))
                     .collect(),
             );
         }
@@ -519,11 +519,17 @@ impl Index {
     }
 
     fn resolve_tfstate(&self, value: &str) -> Option<i64> {
-        let (key, output) = value.split_once('|')?;
-        let found: Vec<i64> = self
-            .backends
-            .get(key)?
-            .iter()
+        single(self.tfstate_candidates(value))
+    }
+
+    fn tfstate_candidates(&self, value: &str) -> Vec<i64> {
+        let Some((key, output)) = value.split_once('|') else {
+            return Vec::new();
+        };
+        self.backends
+            .get(key)
+            .into_iter()
+            .flatten()
             .flat_map(|dir| {
                 self.tf_dirs
                     .get(dir)
@@ -531,8 +537,7 @@ impl Index {
                     .flatten()
                     .filter_map(|f| self.node(*f, NodeKind::Output, output))
             })
-            .collect();
-        single(found)
+            .collect()
     }
 
     // ---- kubernetes / helm

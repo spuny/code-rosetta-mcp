@@ -77,6 +77,17 @@ Optimistic generation checks reject a stale concurrent publication. Readers load
 a consistent snapshot and rebuild their cache when the revision changes, including
 updates made by a different process.
 
+Credential-path content is stripped before publication and when loading older
+Rust alpha rows, including parsed nodes. Loading does not rewrite the old database:
+re-index or remove affected repositories to remove previously persisted plaintext
+(and treat existing backups separately).
+
+File identities must be unique across repositories. A collision, such as `acme`
+with file `lib/app.py` and `acme/lib` with file `app.py`, aborts the publication
+without changing the index. `::` is reserved for symbol identifiers and is not
+allowed in indexed file paths. An older ambiguous index fails closed; remove one
+conflicting repository with `rosetta remove`, then re-index with distinct names.
+
 No in-place conversion of existing Python/internal indexes, or automatic
 SQLite-to-PostgreSQL migration, is provided. Select an empty public Rust database
 and re-index the repositories. Do not point the public binary at the internal

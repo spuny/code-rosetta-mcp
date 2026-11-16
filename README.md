@@ -10,8 +10,8 @@ Sourcebot/Saucebot UI or compatibility API. The previous Python source remains i
 
 ## Build
 
-The Rust 1.98.1 toolchain is pinned in `rust-toolchain.toml`. Git is needed to index
-tracked files and synchronize GitLab repositories. SQLite is bundled. Local
+The Rust 1.98.1 toolchain is pinned in `rust-toolchain.toml`. Git is required for
+repository discovery, indexing and GitLab synchronization. SQLite is bundled. Local
 SQLite use requires neither a database service nor GitLab credentials.
 
 ```sh
@@ -37,12 +37,16 @@ In a Git working tree, indexing uses tracked working-tree files, not untracked
 files or just the committed revision. For a plain directory, Rosetta walks regular
 files. Re-index to pick up changes; unchanged content reuses its parsed result,
 renames/deletions replace the previous repository generation, and publication is
-transactional. If another indexer publishes the same repository while it is being
-scanned, retry rather than overwrite its generation. Query commands read storage
+transactional. Git discovery failures abort indexing rather than falling back to
+reading untracked/ignored files. Credential-directory roots and the entire home
+directory are refused. If another indexer publishes the same repository while it
+is being scanned, retry rather than overwrite its generation. Query commands read storage
 directly and do not require an HTTP server.
 
 You can index multiple repositories into the same database using distinct names.
-Use one explicit database path when indexing from different working directories:
+Names and paths must produce unique `<repo>/<path>` identities; conflicting
+combinations are rejected transactionally. Paths containing `::` are reserved for
+symbol identifiers and rejected. Use one explicit database path when indexing from different working directories:
 
 ```sh
 rosetta --database /absolute/path/graph.db index --path /src/backend --name team/backend
@@ -129,8 +133,12 @@ text in each serving process's memory. PostgreSQL provides shared durable storag
 it does not make the in-memory query engine distributed. Processes refresh their
 snapshot after another indexer publishes a generation.
 
-Credential-like filenames (`.env`, private keys, kubeconfigs, Terraform state,
-credential files), symlinks, binaries and files over 1 MB have no stored content.
+Credential directories (`.ssh`, `.kube`, `.aws`, `.gnupg`) and credential-like
+filenames (`.env`, standard SSH private-key names, `.git-credentials`, Docker's
+`.docker/config.json`, kubeconfigs and Terraform state), symlinks, binaries and
+files over 1 MB have no stored content. Credential content from older Rust alpha
+indexes is also withheld when loaded; re-index or remove those repositories to
+remove previously persisted plaintext.
 Vendored/generated directories and lockfiles are excluded. **This is not a secret
 scanner:** credentials committed in ordinary source files can still be indexed and
 returned by search or review snippets. Protect database files, clones, backups and

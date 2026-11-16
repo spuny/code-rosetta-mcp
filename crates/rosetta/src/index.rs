@@ -68,33 +68,44 @@ fn excluded(path: &str) -> bool {
         })
 }
 
-fn credentials(path: &str) -> bool {
-    let path = path.to_ascii_lowercase();
-    let name = path.rsplit('/').next().unwrap_or(&path);
-    (name.starts_with(".env")
-        && !name.ends_with(".example")
-        && !name.ends_with(".template")
-        && !name.ends_with(".sample"))
-        || name.starts_with("id_rsa")
-        || name.starts_with("id_ed25519")
-        || name.contains("kubeconfig")
-        || name.contains(".tfstate")
-        || matches!(
-            name,
-            ".netrc" | ".npmrc" | ".pypirc" | "credentials" | "credentials.json"
-        )
-        || [".pem", ".key", ".p12", ".pfx"]
-            .iter()
-            .any(|s| name.ends_with(s))
-}
-
 fn git(root: &Path, args: &[&str]) -> Result<std::process::Output> {
     Command::new("git")
         .arg("-C")
         .arg(root)
         .args(args)
+        .env("LC_ALL", "C")
         .output()
         .context("cannot execute git")
+}
+
+fn is_git_worktree(root: &Path) -> Result<bool> {
+    let discovery = git(root, &["rev-parse", "--is-inside-work-tree"])?;
+    if discovery.status.success() {
+        return match discovery.stdout.trim_ascii() {
+            b"true" => Ok(true),
+            _ => {
+                bail!("indexing requires a Git working tree or a plain directory, not Git metadata")
+            }
+        };
+    }
+    let mut marker = false;
+    for directory in root.ancestors() {
+        match directory.join(".git").symlink_metadata() {
+            Ok(_) => {
+                marker = true;
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => bail!("cannot inspect Git repository status; index was not changed"),
+        }
+    }
+    if !marker
+        && discovery.status.code() == Some(128)
+        && discovery.stderr.starts_with(b"fatal: not a git repository")
+    {
+        return Ok(false);
+    }
+    bail!("Git repository discovery failed; index was not changed")
 }
 
 pub async fn index(
@@ -121,14 +132,20 @@ pub async fn index(
     if !root.is_dir() {
         bail!("repository path must be a directory");
     }
+    if crate::policy::credential_directory(&root.to_string_lossy()) {
+        bail!("refusing to index a credential directory");
+    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    if home.and_then(|p| std::fs::canonicalize(p).ok()).as_ref() == Some(&root) {
+        bail!("refusing to index the entire home directory; choose a project directory");
+    }
     let previous = storage.load().await?.repositories.remove(name);
     let root_for_scan = root.clone();
     let name = name.to_owned();
     let (repository, report, expected) = tokio::task::spawn_blocking(move || -> Result<_> {
         let root = root_for_scan;
         let mut paths = BTreeSet::new();
-        let is_git = git(&root, &["rev-parse", "--is-inside-work-tree"])
-            .is_ok_and(|o| o.status.success() && o.stdout.starts_with(b"true"));
+        let is_git = is_git_worktree(&root)?;
         let mut git_ref = if is_git {
             let listing = git(
                 &root,
@@ -205,7 +222,7 @@ pub async fn index(
                 Some("symlink")
             } else if !metadata.is_file() {
                 Some("not a regular file")
-            } else if credentials(&path) {
+            } else if crate::policy::credential_path(&full.to_string_lossy()) {
                 Some("credential filename")
             } else if metadata.len() > MAX_FILE_BYTES {
                 Some("file too large")

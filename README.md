@@ -2,6 +2,10 @@
 
 Cross-language codebase graph for LLM agents. Python, Terraform/HCL, YAML, Jinja2 — one unified, queryable map.
 
+**Planned Rust version:** see the [public Rust migration plan](docs/public-rust-plan.md)
+for a UI-free rewrite with stdio/HTTP MCP and independently selectable SQLite/PostgreSQL
+storage. This is a target design, not functionality available in this Python version.
+
 **The problem:** LLM coding agents re-read your entire codebase every session. Existing tools like [code-review-graph](https://github.com/tirth8205/code-review-graph) and [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) handle Python/JS/Go well, but if your stack includes Terraform, YAML configs, and Jinja2 templates — they're blind to most of your code.
 
 **Code Rosetta** parses all four languages into a single knowledge graph with cross-language and cross-repo reference detection. Change a Terraform variable and see which YAML configs, Python scripts, and Jinja templates are affected — across repository boundaries.
